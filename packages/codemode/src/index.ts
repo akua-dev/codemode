@@ -17,6 +17,7 @@ export type {
 
 // Executors (for advanced usage / custom executor selection)
 export { IsolatedVMExecutor } from "./executor/isolated-vm.js";
+export { QuickJSExecutor } from "./executor/quickjs.js";
 export { createExecutor } from "./executor/auto.js";
 
 // Request bridge (for advanced usage / custom request handling)

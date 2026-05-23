@@ -28,9 +28,12 @@ Fetches the real Petstore OpenAPI spec from the web, then runs search + execute 
 ```bash
 pnpm add @robinbraemer/codemode
 
-# Install the sandbox runtime:
-pnpm add isolated-vm       # V8 isolates
+# Install a sandbox runtime (at least one):
+pnpm add isolated-vm           # V8 isolates — recommended for production on Node
+pnpm add quickjs-emscripten    # WASM QuickJS — fallback for Bun / CF Workers / browser
 ```
+
+If both are installed, the auto-selector (`createExecutor`) picks `isolated-vm` on Node and `quickjs-emscripten` on Bun (where `isolated-vm` cannot dlopen because Bun's JavaScriptCore engine does not export the V8 symbols `isolated-vm` requires).
 
 ## Quick Start
 
@@ -269,11 +272,21 @@ const tags = extractTags(rawSpec);
 
 ## Executors
 
-CodeMode uses `isolated-vm` (V8 isolates) for sandboxed execution. You can pass a custom instance:
+CodeMode ships two executor backends. `IsolatedVMExecutor` is the recommended production backend on Node. `QuickJSExecutor` is a compatibility fallback for environments where `isolated-vm` cannot load (Bun, Cloudflare Workers, browser).
+
+Use `createExecutor()` for automatic selection, or pass an executor instance explicitly:
 
 ```typescript
-import { CodeMode, IsolatedVMExecutor } from '@robinbraemer/codemode';
+import { CodeMode, createExecutor, IsolatedVMExecutor, QuickJSExecutor } from '@robinbraemer/codemode';
 
+// Automatic — picks isolated-vm on Node, quickjs-emscripten on Bun
+const codemode = new CodeMode({
+  spec,
+  request: handler,
+  executor: await createExecutor({ memoryMB: 128, timeoutMs: 60_000 }),
+});
+
+// Or explicit
 const codemode = new CodeMode({
   spec,
   request: handler,
@@ -285,9 +298,17 @@ const codemode = new CodeMode({
 });
 ```
 
-| Executor | Package | Performance | Portability |
-|----------|---------|-------------|-------------|
-| `IsolatedVMExecutor` | `isolated-vm` | Native V8 speed | Node.js |
+| Executor | Package | Performance | Portability | Production-ready |
+|----------|---------|-------------|-------------|------------------|
+| `IsolatedVMExecutor` | `isolated-vm` | Native V8 speed | Node.js | ✅ |
+| `QuickJSExecutor` | `quickjs-emscripten` | Slower (interpreted WASM) | Node, Bun, CF Workers, browser | ⚠️ fallback only — see caveats |
+
+### `QuickJSExecutor` caveats
+
+- **Not a production backend.** Exists so the package loads on runtimes where `isolated-vm` cannot dlopen. Production callers on Node should use `IsolatedVMExecutor`.
+- **Sandboxed code must avoid sequential `await` on host functions.** Use `Promise.all([fn1(), fn2()])` for parallel calls instead. Chained sequential `await`s currently crash with an upstream `quickjs-emscripten@0.32.0` release-asyncify regression ([justjake/quickjs-emscripten#258](https://github.com/justjake/quickjs-emscripten/issues/258)) — reproduces identically on Node and Bun.
+- **Return-value semantics differ from `isolated-vm`.** Host ↔ guest values cross via a `JSON.stringify` envelope. `Date`, `Map`, `Set`, `BigInt` are converted to strings/objects, not preserved as instances. `isolated-vm` uses structured clone and preserves them. Stick to plain JSON-safe shapes in sandboxed code that targets both backends.
+- **CPU timeout is wall-clock-based.** `isolated-vm` uses true CPU time; QuickJS uses elapsed time. Async host calls that take wall time count against the CPU budget under QuickJS.
 
 ### Custom Executor
 
