@@ -5,9 +5,17 @@ import type { Executor, SandboxOptions } from "../types.js";
  * (it relies on V8 symbols like `v8::ValueSerializer::Delegate::IsHostObject`
  * that Bun's JavaScriptCore engine does not export), so we prefer the WASM
  * QuickJS backend.
+ *
+ * Uses Bun's officially documented detection pattern:
+ * https://bun.com/docs/guides/util/detect-bun
+ *
+ * The `typeof process` guard keeps this safe in non-Node-shaped runtimes
+ * (Cloudflare Workers, browser) where `process` is undefined.
  */
 function isBun(): boolean {
-  return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+  // Cast through globalThis to avoid requiring @types/node just for `process`.
+  const proc = (globalThis as { process?: { versions?: { bun?: string } } }).process;
+  return !!proc?.versions?.bun;
 }
 
 /**
