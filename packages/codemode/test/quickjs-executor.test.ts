@@ -378,4 +378,34 @@ describe("ExecuteStats shape parity (QuickJS vs IsolatedVM)", () => {
       expect(Number.isFinite(qjsVal)).toBe(true);
     }
   });
+
+  it("documents the return-value semantic divergence (structured clone vs JSON)", async () => {
+    // isolated-vm uses structured clone (`{ copy: true }`) — preserves Date,
+    // Map, Set, BigInt as their original types. QuickJSExecutor uses a
+    // JSON.stringify envelope as a workaround for upstream GC-anchoring bugs
+    // in quickjs-emscripten@0.32.0 release-asyncify, so those types degrade
+    // to their JSON representation.
+    //
+    // This test locks the divergence so any future change (e.g. an upstream
+    // fix that lets us drop the JSON envelope) breaks loudly.
+    const { IsolatedVMExecutor } = await import("../src/executor/isolated-vm.js");
+    const code = `async () => new Date("2026-01-15T00:00:00Z")`;
+
+    const ivmExec = new IsolatedVMExecutor();
+    const qjsExec = new QuickJSExecutor();
+
+    const ivmRes = await ivmExec.execute(code, {});
+    const qjsRes = await qjsExec.execute(code, {});
+
+    expect(ivmRes.error).toBeUndefined();
+    expect(qjsRes.error).toBeUndefined();
+
+    // isolated-vm: structured clone preserves the Date instance.
+    expect(ivmRes.result).toBeInstanceOf(Date);
+    expect((ivmRes.result as Date).toISOString()).toBe("2026-01-15T00:00:00.000Z");
+
+    // QuickJS: JSON envelope returns the date as an ISO-8601 string.
+    expect(typeof qjsRes.result).toBe("string");
+    expect(qjsRes.result).toBe("2026-01-15T00:00:00.000Z");
+  });
 });

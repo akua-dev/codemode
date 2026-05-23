@@ -26,6 +26,22 @@ import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../t
  * `captureStats` for the exact mapping. The shape (key names + types) is
  * preserved so callers can treat both executors interchangeably.
  *
+ * Semantic divergences from `IsolatedVMExecutor`
+ * ----------------------------------------------
+ * - **Return-value type fidelity.** `isolated-vm` uses structured clone for
+ *   host↔guest values (`{ copy: true }`) — `Date`, `Map`, `Set`, `BigInt`,
+ *   typed arrays are preserved as their original types. This executor uses
+ *   a `JSON.stringify` envelope to work around an upstream GC-anchoring bug
+ *   (see Workaround #2 below), so guest code that returns a `Date` gets back
+ *   a date-string, a `Map` gets back `{}`, etc. Stick to JSON-safe shapes
+ *   in sandboxed code that targets both backends.
+ * - **CPU timeout is wall-clock-based.** `IsolatedVMExecutor` enforces a true
+ *   CPU-time limit via V8's script timeout. QuickJS does not expose CPU
+ *   time separately from wall time, so `timeoutMs` here is measured from
+ *   `execute()` entry with `Date.now()`. Async host calls that take wall
+ *   time count against this budget — pick `timeoutMs` higher than you would
+ *   for isolated-vm if guest code does any I/O via host functions.
+ *
  * Upstream bugs in `quickjs-emscripten@0.32.0` release-asyncify
  * -------------------------------------------------------------
  * The following two issues are **not Bun-specific** — empirically reproduced
@@ -236,14 +252,16 @@ export class QuickJSExecutor implements Executor {
         }
       }
       try {
+        // `context.dispose()` already owns the runtime lifetime
+        // (quickjs-emscripten-core attaches the runtime to the context's
+        // ownedLifetimes), so no separate `runtime.dispose()` call is needed.
+        // Calling it would throw QuickJSUseAfterFree — silently — and obscure
+        // real disposal errors.
         context.dispose();
       } catch {
-        // ignore
-      }
-      try {
-        runtime.dispose();
-      } catch {
-        // ignore
+        // ignore — best-effort cleanup; release-asyncify can throw
+        // assertion noise on dispose after asyncified host fns are defined
+        // (upstream quickjs-emscripten#261).
       }
     }
   }
