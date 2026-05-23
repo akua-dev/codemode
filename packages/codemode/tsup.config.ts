@@ -9,5 +9,5 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
-  external: ["isolated-vm"],
+  external: ["isolated-vm", "quickjs-emscripten"],
 });
