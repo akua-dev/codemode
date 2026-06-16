@@ -91,6 +91,21 @@ async function verifyNativePackage(
   expectArrayEqual(packageJson.cpu, [expectedPackage.cpu], `${relativePackageDir} cpu`);
   expectEqual(packageJson.license, rootPackageJson.license, `${relativePackageDir} license`);
   expectEqual(
+    packageJson.repository?.type,
+    rootPackageJson.repository?.type,
+    `${relativePackageDir} repository.type`,
+  );
+  expectEqual(
+    packageJson.repository?.url,
+    rootPackageJson.repository?.url,
+    `${relativePackageDir} repository.url`,
+  );
+  expectEqual(
+    packageJson.repository?.directory,
+    rootPackageJson.repository?.directory,
+    `${relativePackageDir} repository.directory`,
+  );
+  expectEqual(
     packageJson.publishConfig?.access,
     rootPackageJson.publishConfig?.access,
     `${relativePackageDir} publishConfig.access`,

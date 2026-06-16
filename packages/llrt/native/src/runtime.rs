@@ -6,7 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use llrt_core::vm::{Vm, VmOptions};
+use llrt_core::{
+    modules::module_builder::ModuleBuilder,
+    vm::{Vm, VmOptions},
+};
 use llrt_json::{parse::json_parse, stringify::json_stringify};
 use napi::{
     bindgen_prelude::Promise as NapiPromise, bindgen_prelude::*,
@@ -95,6 +98,8 @@ async fn call_json_inner(
         .unwrap_or(64 * 1024 * 1024);
 
     let vm = Vm::from_options(VmOptions {
+        module_builder: ModuleBuilder::new(),
+        allow_module_loading: false,
         max_stack_size: max_stack_bytes,
         ..VmOptions::default()
     })

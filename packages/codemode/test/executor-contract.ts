@@ -209,6 +209,32 @@ export function executorContract(
       expect(result3.result).toBe("undefined");
     });
 
+    it("cannot dynamically import host capability modules", async () => {
+      const executor = factory();
+      const result = await executor.execute(
+        `async () => {
+          for (const specifier of ["node:fs", "fs", "node:process"]) {
+            try {
+              const imported = await import(specifier);
+              if (
+                typeof imported.readFileSync === "function" ||
+                typeof imported.default?.readFileSync === "function" ||
+                typeof imported.env === "object"
+              ) {
+                return { leaked: specifier };
+              }
+            } catch {
+              // Expected: sandboxed execution cannot resolve host modules.
+            }
+          }
+          return { blocked: true };
+        }`,
+        {},
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.result).toEqual({ blocked: true });
+    });
+
     it("chains multiple async host calls", async () => {
       const executor = factory();
       const result = await executor.execute(

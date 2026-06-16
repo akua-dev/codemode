@@ -31,6 +31,8 @@ export interface RequestBridgeOptions {
   maxResponseBytes?: number;
   /** Allowed headers whitelist. When undefined, uses default blocklist. */
   allowedHeaders?: string[];
+  /** Response headers exposed to sandbox code. Default: none. */
+  exposedResponseHeaders?: string[];
 }
 
 const ALLOWED_METHODS = new Set([
@@ -53,6 +55,11 @@ const BLOCKED_HEADER_PATTERNS = [
   /^connection$/i,
   /^upgrade$/i,
   /^te$/i,
+  /^forwarded$/i,
+  /^content-length$/i,
+  /^x-http-method-override$/i,
+  /^x-original-url$/i,
+  /^x-rewrite-url$/i,
 ];
 
 const DEFAULT_MAX_REQUESTS = 50;
@@ -139,16 +146,18 @@ function validatePath(path: string): void {
  */
 function filterHeaders(
   headers: Record<string, string> | undefined,
-  allowedHeaders: string[] | undefined,
+  allowedHeaders: Set<string> | undefined,
 ): Record<string, string> {
   if (!headers) return {};
 
+  const isBlocked = (key: string) => BLOCKED_HEADER_PATTERNS.some((p) => p.test(key));
+
   if (allowedHeaders) {
-    // Whitelist mode: only forward explicitly allowed headers
-    const allowed = new Set(allowedHeaders.map((h) => h.toLowerCase()));
+    // Whitelist mode: only forward explicitly allowed headers after the
+    // hard denylist has removed credential, routing, and hop-by-hop headers.
     const filtered: Record<string, string> = {};
     for (const [key, value] of Object.entries(headers)) {
-      if (allowed.has(key.toLowerCase())) {
+      if (allowedHeaders.has(key.toLowerCase()) && !isBlocked(key)) {
         filtered[key] = value;
       }
     }
@@ -158,8 +167,23 @@ function filterHeaders(
   // Blocklist mode: strip dangerous headers
   const filtered: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
-    const blocked = BLOCKED_HEADER_PATTERNS.some((p) => p.test(key));
-    if (!blocked) {
+    if (!isBlocked(key)) {
+      filtered[key] = value;
+    }
+  }
+  return filtered;
+}
+
+function filterResponseHeaders(
+  headers: Headers,
+  exposedResponseHeaders: Set<string> | undefined,
+): Record<string, string> {
+  if (!exposedResponseHeaders) return {};
+
+  const filtered: Record<string, string> = {};
+  for (const key of exposedResponseHeaders) {
+    const value = headers.get(key);
+    if (value !== null) {
       filtered[key] = value;
     }
   }
@@ -183,7 +207,12 @@ export function createRequestBridge(
 ): RequestBridgeFn {
   const maxRequests = options.maxRequests ?? DEFAULT_MAX_REQUESTS;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-  const allowedHeaders = options.allowedHeaders;
+  const allowedHeaders = options.allowedHeaders
+    ? new Set(options.allowedHeaders.map((h) => h.toLowerCase()))
+    : undefined;
+  const exposedResponseHeaders = options.exposedResponseHeaders
+    ? new Set(options.exposedResponseHeaders.map((h) => h.toLowerCase()))
+    : undefined;
 
   let requestCount = 0;
 
@@ -234,11 +263,7 @@ export function createRequestBridge(
     // Call the host handler
     const response = await handler(url.toString(), init);
 
-    // Parse response headers
-    const responseHeaders: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
-    });
+    const responseHeaders = filterResponseHeaders(response.headers, exposedResponseHeaders);
 
     // Read response body with streaming size limit to avoid host OOM.
     // Abort as soon as accumulated bytes exceed the limit.
