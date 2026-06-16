@@ -3,6 +3,7 @@ import { loadNativeBinding } from "./native.js";
 import type {
   LlrtCallOptions,
   LlrtExecutionErrorInfo,
+  LlrtHostCallContext,
   LlrtHostFunction,
   LlrtResult,
   LlrtRuntimeOptions,
@@ -63,20 +64,27 @@ export class LlrtRuntime {
 
     try {
       const binding = loadNativeBinding();
+      const abortController = new AbortController();
       const hostDispatcher = options.functions
-        ? createHostDispatcher(options.functions)
+        ? createHostDispatcher(options.functions, abortController.signal)
         : undefined;
-      const result = await binding.callJson(
-        hostDispatcher ? wrapSourceForHostFunctions(source) : source,
-        inputJson.value,
-        {
-          memoryMb: options.memoryMB ?? this.options.memoryMB,
-          wallTimeMs: options.wallTimeMs ?? this.options.wallTimeMs,
-          cpuTimeMs: options.cpuTimeMs ?? this.options.cpuTimeMs,
-          maxStackBytes: options.maxStackBytes ?? this.options.maxStackBytes,
-        },
-        hostDispatcher,
-      );
+      const result = await (async () => {
+        try {
+          return await binding.callJson(
+            hostDispatcher ? wrapSourceForHostFunctions(source) : source,
+            inputJson.value,
+            {
+              memoryMb: options.memoryMB ?? this.options.memoryMB,
+              wallTimeMs: options.wallTimeMs ?? this.options.wallTimeMs,
+              cpuTimeMs: options.cpuTimeMs ?? this.options.cpuTimeMs,
+              maxStackBytes: options.maxStackBytes ?? this.options.maxStackBytes,
+            },
+            hostDispatcher,
+          );
+        } finally {
+          abortController.abort();
+        }
+      })();
 
       if (!result.ok) {
         return {
@@ -135,6 +143,7 @@ export class LlrtRuntime {
 
 function createHostDispatcher(
   functions: Record<string, LlrtHostFunction>,
+  signal: AbortSignal,
 ): (payloadJson: string) => Promise<string> {
   return async (payloadJson) => {
     const { name, argsJson } = JSON.parse(payloadJson) as {
@@ -147,7 +156,8 @@ function createHostDispatcher(
     }
 
     const args = JSON.parse(argsJson) as unknown[];
-    const result = await hostFunction(...args);
+    const context: LlrtHostCallContext = { signal };
+    const result = await hostFunction.apply(context, args);
     const resultJson = JSON.stringify(result);
     if (resultJson === undefined) {
       return "null";

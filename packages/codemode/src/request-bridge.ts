@@ -27,12 +27,18 @@ export interface SandboxResponse {
 export interface RequestBridgeOptions {
   /** Maximum number of requests per bridge instance. Default: 50. */
   maxRequests?: number;
+  /** Maximum request body size in bytes. Default: 1MB. */
+  maxRequestBytes?: number;
   /** Maximum response body size in bytes. Default: 10MB. */
   maxResponseBytes?: number;
   /** Allowed headers whitelist. When undefined, uses default blocklist. */
   allowedHeaders?: string[];
   /** Response headers exposed to sandbox code. Default: none. */
   exposedResponseHeaders?: string[];
+}
+
+export interface RequestBridgeContext {
+  signal?: AbortSignal;
 }
 
 const ALLOWED_METHODS = new Set([
@@ -63,7 +69,44 @@ const BLOCKED_HEADER_PATTERNS = [
 ];
 
 const DEFAULT_MAX_REQUESTS = 50;
+const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024; // 1MB
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10MB
+
+function requestAbortedError(): Error {
+  return new Error("Request aborted");
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw requestAbortedError();
+  }
+}
+
+function utf8ByteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+async function abortable<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return await operation;
+  throwIfAborted(signal);
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<T>((_resolve, reject) => {
+    onAbort = () => reject(requestAbortedError());
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
 
 /**
  * Read a response body as text, aborting early if it exceeds maxBytes.
@@ -73,11 +116,13 @@ const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10MB
 async function readResponseWithLimit(
   response: Response,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<string> {
+  throwIfAborted(signal);
   const reader = response.body?.getReader();
   if (!reader) {
     // No body stream — fall back to .text() (e.g., empty responses)
-    const text = await response.text();
+    const text = await abortable(response.text(), signal);
     if (text.length > maxBytes) {
       throw new Error(
         `Response too large: ${text.length} bytes exceeds limit of ${maxBytes} bytes`,
@@ -88,20 +133,28 @@ async function readResponseWithLimit(
 
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
+  let shouldCancel = false;
   try {
     // Streaming read — must be sequential
     for (;;) {
-      const { done, value } = await reader.read(); // oxlint-disable-line no-await-in-loop
+      const { done, value } = await abortable(reader.read(), signal); // oxlint-disable-line no-await-in-loop
       if (done) break;
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
+        shouldCancel = true;
         throw new Error(
           `Response too large: exceeded limit of ${maxBytes} bytes`,
         );
       }
       chunks.push(value);
     }
+  } catch (error) {
+    shouldCancel = true;
+    throw error;
   } finally {
+    if (shouldCancel) {
+      await reader.cancel().catch(() => {});
+    }
     reader.releaseLock();
   }
 
@@ -195,7 +248,10 @@ function filterResponseHeaders(
  * Bridges sandbox API calls to the host request handler (Hono app.request, fetch, etc.).
  */
 /** Bridge function with an exposed request count. */
-export type RequestBridgeFn = ((options: SandboxRequestOptions) => Promise<SandboxResponse>) & {
+export type RequestBridgeFn = ((
+  options: SandboxRequestOptions,
+  context?: RequestBridgeContext,
+) => Promise<SandboxResponse>) & {
   /** Number of requests made through this bridge instance. */
   readonly requestCount: number;
 };
@@ -206,6 +262,7 @@ export function createRequestBridge(
   options: RequestBridgeOptions = {},
 ): RequestBridgeFn {
   const maxRequests = options.maxRequests ?? DEFAULT_MAX_REQUESTS;
+  const maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const allowedHeaders = options.allowedHeaders
     ? new Set(options.allowedHeaders.map((h) => h.toLowerCase()))
@@ -216,8 +273,13 @@ export function createRequestBridge(
 
   let requestCount = 0;
 
-  const bridge = async (opts: SandboxRequestOptions): Promise<SandboxResponse> => {
+  const bridge = async (
+    opts: SandboxRequestOptions,
+    context?: RequestBridgeContext,
+  ): Promise<SandboxResponse> => {
+    const signal = context?.signal;
     const { method, path, query, body, headers } = opts;
+    throwIfAborted(signal);
 
     // Validate request count
     if (++requestCount > maxRequests) {
@@ -252,23 +314,35 @@ export function createRequestBridge(
     const init: RequestInit = {
       method: upperMethod,
       headers: { ...filteredHeaders },
+      signal,
     };
 
     if (body !== undefined && body !== null) {
-      init.body = JSON.stringify(body);
+      const bodyJson = JSON.stringify(body);
+      const bodyBytes = utf8ByteLength(bodyJson);
+      if (bodyBytes > maxRequestBytes) {
+        throw new Error(
+          `Request body too large: ${bodyBytes} bytes exceeds limit of ${maxRequestBytes} bytes`,
+        );
+      }
+      init.body = bodyJson;
       (init.headers as Record<string, string>)["content-type"] =
         (init.headers as Record<string, string>)["content-type"] ?? "application/json";
     }
 
     // Call the host handler
-    const response = await handler(url.toString(), init);
+    const response = await abortable(
+      Promise.resolve(handler(url.toString(), init)),
+      signal,
+    );
+    throwIfAborted(signal);
 
     const responseHeaders = filterResponseHeaders(response.headers, exposedResponseHeaders);
 
     // Read response body with streaming size limit to avoid host OOM.
     // Abort as soon as accumulated bytes exceed the limit.
     const contentType = response.headers.get("content-type") ?? "";
-    const text = await readResponseWithLimit(response, maxResponseBytes);
+    const text = await readResponseWithLimit(response, maxResponseBytes, signal);
 
     let responseBody: unknown;
     if (contentType.includes("application/json")) {

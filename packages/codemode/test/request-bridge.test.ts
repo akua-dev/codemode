@@ -122,6 +122,20 @@ describe("request limits", () => {
       bridge({ method: "GET", path: "/req-51" }),
     ).rejects.toThrow("Request limit exceeded");
   });
+
+  it("rejects request bodies exceeding maxRequestBytes", async () => {
+    const bridge = createRequestBridge(echoHandler, "http://localhost", {
+      maxRequestBytes: 64,
+    });
+
+    await expect(
+      bridge({
+        method: "POST",
+        path: "/too-large",
+        body: { payload: "x".repeat(128) },
+      }),
+    ).rejects.toThrow("Request body too large");
+  });
 });
 
 describe("header filtering", () => {

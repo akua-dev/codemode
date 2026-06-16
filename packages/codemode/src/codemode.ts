@@ -1,6 +1,7 @@
 import { createExecutor } from "./executor/auto.js";
 import {
   createRequestBridge,
+  type RequestBridgeContext,
   type RequestBridgeOptions,
   type SandboxRequestOptions,
 } from "./request-bridge.js";
@@ -104,6 +105,7 @@ export class CodeMode {
     this.bridgeBaseUrl = options.baseUrl ?? "http://localhost";
     this.bridgeOptions = {
       maxRequests: options.maxRequests,
+      maxRequestBytes: options.maxRequestBytes,
       maxResponseBytes: options.maxResponseBytes,
       allowedHeaders: options.allowedHeaders,
       exposedResponseHeaders: options.exposedResponseHeaders,
@@ -174,7 +176,9 @@ export class CodeMode {
       this.bridgeHandler, this.bridgeBaseUrl, this.bridgeOptions,
     );
     const client = {
-      request: (...args: unknown[]) => bridge(args[0] as SandboxRequestOptions),
+      request(this: RequestBridgeContext, options: SandboxRequestOptions) {
+        return bridge(options, this);
+      },
     };
 
     const result = await executor.execute(code, {

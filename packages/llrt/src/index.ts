@@ -15,6 +15,7 @@ export type {
   LlrtCallResult,
   LlrtExecutionErrorCode,
   LlrtExecutionErrorInfo,
+  LlrtHostCallContext,
   LlrtResult,
   LlrtRuntimeOptions,
   LlrtStats,

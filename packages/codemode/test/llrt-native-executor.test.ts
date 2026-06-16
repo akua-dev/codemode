@@ -5,6 +5,7 @@ import {
   describeWithLlrtNativeBinding as describe,
   llrtNativeBindingAvailable,
 } from "./llrt-native-test-helper.js";
+import type { LlrtHostCallContext } from "@robinbraemer/llrt";
 
 if (llrtNativeBindingAvailable) {
   executorContract(
@@ -64,5 +65,59 @@ describe("LlrtNativeExecutor", () => {
 
     expect(result.error).toBeUndefined();
     expect(result.result).toEqual({ title: "Petstore", path: "/v1/pets" });
+  });
+
+  it("does not expose host call context as a guest argument", async () => {
+    const executor = new LlrtNativeExecutor({ memoryMB: 8, wallTimeMs: 1000 });
+
+    const result = await executor.execute(
+      `async () => countArgs("a", "b")`,
+      { countArgs: (...args: unknown[]) => args.length },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toBe(2);
+  });
+
+  it("aborts in-flight host functions when execution times out", async () => {
+    const executor = new LlrtNativeExecutor({ memoryMB: 8, wallTimeMs: 20 });
+    let sawAbortSignal = false;
+    let resolveAborted: (() => void) | undefined;
+    const aborted = new Promise<void>((resolve) => {
+      resolveAborted = resolve;
+    });
+
+    const result = await executor.execute(
+      `async () => {
+        await api.request({ path: "/slow" });
+      }`,
+      {
+        api: {
+          request: async function (
+            this: LlrtHostCallContext,
+            _request: { path: string },
+          ) {
+            if (!this.signal) {
+              throw new Error("missing abort signal");
+            }
+            sawAbortSignal = true;
+            await new Promise<void>((resolve) => {
+              this.signal.addEventListener("abort", resolve, { once: true });
+            });
+            resolveAborted?.();
+            return { status: 499, body: { aborted: true } };
+          },
+        },
+      },
+    );
+
+    expect(result.error).toContain("Wall-clock timeout exceeded");
+    await Promise.race([
+      aborted,
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("host function was not aborted")), 100);
+      }),
+    ]);
+    expect(sawAbortSignal).toBe(true);
   });
 });

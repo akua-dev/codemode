@@ -13,7 +13,14 @@ export interface LlrtCallOptions {
   functions?: Record<string, LlrtHostFunction>;
 }
 
-export type LlrtHostFunction = (...args: unknown[]) => unknown | Promise<unknown>;
+export interface LlrtHostCallContext {
+  signal: AbortSignal;
+}
+
+export type LlrtHostFunction = (
+  this: LlrtHostCallContext,
+  ...args: unknown[]
+) => unknown | Promise<unknown>;
 
 export interface LlrtStats {
   wallTimeMs: number;

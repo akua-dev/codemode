@@ -25,7 +25,12 @@ export { createExecutor } from "./executor/auto.js";
 
 // Request bridge (for advanced usage / custom request handling)
 export { createRequestBridge } from "./request-bridge.js";
-export type { SandboxRequestOptions, SandboxResponse, RequestBridgeFn } from "./request-bridge.js";
+export type {
+  RequestBridgeContext,
+  RequestBridgeFn,
+  SandboxRequestOptions,
+  SandboxResponse,
+} from "./request-bridge.js";
 
 // Spec processing
 export { resolveRefs, processSpec, extractTags, extractServerBasePath } from "./spec.js";

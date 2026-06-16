@@ -10,7 +10,7 @@ const publishWorkflowPath = join(root, ".github/workflows/publish.yml");
 describe("codemode package publication", () => {
   it("publishes the LLRT executor release with a compatible optional peer range", () => {
     expect(codemodePackageJson.version).toMatch(/^(?!0\.2\.0$)\d+\.\d+\.\d+(?:[-+].*)?$/);
-    expect(codemodePackageJson.peerDependencies["@robinbraemer/llrt"]).toBe("^0.1.1");
+    expect(codemodePackageJson.peerDependencies["@robinbraemer/llrt"]).toBe("^0.1.2");
     expect(codemodePackageJson.devDependencies["@robinbraemer/llrt"]).toBe("workspace:*");
   });
 

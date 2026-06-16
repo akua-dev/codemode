@@ -165,6 +165,12 @@ export interface CodeModeOptions {
   maxResponseBytes?: number;
 
   /**
+   * Maximum request body size in bytes.
+   * Default: 1MB (1_048_576).
+   */
+  maxRequestBytes?: number;
+
+  /**
    * Allowed headers whitelist. When set, only these headers are forwarded.
    * Credential, routing override, forwarding, and hop-by-hop headers are
    * always stripped even when listed here.
