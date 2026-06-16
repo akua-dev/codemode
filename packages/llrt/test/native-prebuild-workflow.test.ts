@@ -7,6 +7,15 @@ import packageJson from "../package.json" with { type: "json" };
 const root = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const workflowPath = join(root, ".github/workflows/llrt-native.yml");
 
+function getNamedStep(workflow: string, stepName: string) {
+  const marker = `- name: ${stepName}`;
+  const stepStart = workflow.indexOf(marker);
+  expect(stepStart).toBeGreaterThanOrEqual(0);
+
+  const nextStepStart = workflow.indexOf("\n      - ", stepStart + marker.length);
+  return workflow.slice(stepStart, nextStepStart === -1 ? undefined : nextStepStart);
+}
+
 describe("LLRT native prebuild workflow", () => {
   it("builds every napi target declared by the package manifest", () => {
     const workflow = readFileSync(workflowPath, "utf8");
@@ -27,11 +36,17 @@ describe("LLRT native prebuild workflow", () => {
 
   it("packages artifacts before publishing the LLRT package family", () => {
     const workflow = readFileSync(workflowPath, "utf8");
+    const mainPublishStep = getNamedStep(workflow, "Publish main LLRT package");
 
     expect(workflow).toContain("pnpm --filter @robinbraemer/llrt run create:native-packages");
     expect(workflow).toContain("pnpm --filter @robinbraemer/llrt run prepare:native-publish");
-    expect(workflow).toContain("npm publish --access public --no-git-checks");
-    expect(workflow).toContain("pnpm --filter @robinbraemer/llrt publish --access public --no-git-checks");
+    expect(workflow).toContain("npm publish --access public");
+    expect(workflow).not.toContain("--no-git-checks");
+    expect(mainPublishStep).toContain("run: npm publish --access public");
+    expect(mainPublishStep).toContain("working-directory: packages/llrt");
+    expect(workflow).not.toContain(
+      "pnpm --filter @robinbraemer/llrt publish --access public",
+    );
   });
 
   it("installs only the LLRT workspace in native packaging jobs", () => {

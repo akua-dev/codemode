@@ -140,9 +140,10 @@ jobs:
         if: github.event_name == 'release'
         run: |
           for package_dir in packages/llrt/npm/*; do
-            (cd "${package_dir}" && npm publish --access public --no-git-checks)
+            (cd "${package_dir}" && npm publish --access public)
           done
 
       - name: Publish main LLRT package
         if: github.event_name == 'release'
-        run: pnpm --filter @robinbraemer/llrt publish --access public --no-git-checks
+        run: npm publish --access public
+        working-directory: packages/llrt

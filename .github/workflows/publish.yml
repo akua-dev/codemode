@@ -19,4 +19,5 @@ jobs:
 
       - run: task ci
 
-      - run: pnpm --filter @robinbraemer/codemode publish --access public --no-git-checks
+      - run: npm publish --access public
+        working-directory: packages/codemode
