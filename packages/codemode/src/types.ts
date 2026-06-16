@@ -166,10 +166,16 @@ export interface CodeModeOptions {
 
   /**
    * Allowed headers whitelist. When set, only these headers are forwarded.
-   * When undefined, a default blocklist strips dangerous headers
-   * (Authorization, Cookie, Host, X-Forwarded-*, Proxy-*).
+   * Credential, routing override, forwarding, and hop-by-hop headers are
+   * always stripped even when listed here.
    */
   allowedHeaders?: string[];
+
+  /**
+   * Response headers exposed to sandbox code.
+   * Default: none.
+   */
+  exposedResponseHeaders?: string[];
 
   /**
    * Maximum $ref resolution depth.

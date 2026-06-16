@@ -147,6 +147,11 @@ describe("header filtering", () => {
         "connection": "keep-alive",
         "upgrade": "websocket",
         "te": "trailers",
+        "forwarded": "for=1.2.3.4;host=evil.com",
+        "content-length": "999",
+        "x-http-method-override": "DELETE",
+        "x-original-url": "/admin",
+        "x-rewrite-url": "/admin",
         "x-custom": "safe",
         "accept": "application/json",
       },
@@ -168,6 +173,11 @@ describe("header filtering", () => {
     expect(body.headers["connection"]).toBeUndefined();
     expect(body.headers["upgrade"]).toBeUndefined();
     expect(body.headers["te"]).toBeUndefined();
+    expect(body.headers["forwarded"]).toBeUndefined();
+    expect(body.headers["content-length"]).toBeUndefined();
+    expect(body.headers["x-http-method-override"]).toBeUndefined();
+    expect(body.headers["x-original-url"]).toBeUndefined();
+    expect(body.headers["x-rewrite-url"]).toBeUndefined();
     expect(body.headers["x-custom"]).toBe("safe");
     expect(body.headers["accept"]).toBe("application/json");
   });
@@ -193,6 +203,74 @@ describe("header filtering", () => {
     expect(body.headers["content-type"]).toBe("text/plain");
     expect(body.headers["authorization"]).toBeUndefined();
     expect(body.headers["x-custom"]).toBeUndefined();
+  });
+
+  it("never forwards protected headers even when allowedHeaders includes them", async () => {
+    const bridge = createRequestBridge(echoHandler, "http://localhost", {
+      allowedHeaders: ["authorization", "cookie", "host", "forwarded", "accept"],
+    });
+
+    const res = await bridge({
+      method: "GET",
+      path: "/test",
+      headers: {
+        "authorization": "Bearer secret",
+        "cookie": "session=abc",
+        "host": "evil.com",
+        "forwarded": "for=1.2.3.4;host=evil.com",
+        "accept": "application/json",
+      },
+    });
+
+    const body = res.body as { headers: Record<string, string> };
+    expect(body.headers["authorization"]).toBeUndefined();
+    expect(body.headers["cookie"]).toBeUndefined();
+    expect(body.headers["host"]).toBeUndefined();
+    expect(body.headers["forwarded"]).toBeUndefined();
+    expect(body.headers["accept"]).toBe("application/json");
+  });
+});
+
+describe("response header filtering", () => {
+  it("does not expose response headers to sandbox code by default", async () => {
+    const bridge = createRequestBridge(
+      () =>
+        Response.json(
+          { ok: true },
+          {
+            headers: {
+              "set-cookie": "session=secret",
+              "x-internal-trace": "trace-secret",
+            },
+          },
+        ),
+      "http://localhost",
+    );
+
+    const res = await bridge({ method: "GET", path: "/test" });
+
+    expect(res.headers).toEqual({});
+  });
+
+  it("exposes only explicitly allowed response headers", async () => {
+    const bridge = createRequestBridge(
+      () =>
+        Response.json(
+          { ok: true },
+          {
+            headers: {
+              "etag": '"abc123"',
+              "set-cookie": "session=secret",
+            },
+          },
+        ),
+      "http://localhost",
+      { exposedResponseHeaders: ["etag"] },
+    );
+
+    const res = await bridge({ method: "GET", path: "/test" });
+
+    expect(res.headers).toEqual({ etag: '"abc123"' });
   });
 });
 

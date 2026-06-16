@@ -94,6 +94,36 @@ describe("LlrtRuntime.callJson native execution", () => {
     expect(second).toMatchObject({ ok: true, value: "clean" });
   });
 
+  it("denies dynamic imports of host capability modules", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+
+    const result = await runtime.callJson<
+      Record<string, never>,
+      { blocked: true } | { leaked: string }
+    >(
+      `async () => {
+        for (const specifier of ["node:fs", "fs", "node:process"]) {
+          try {
+            const imported = await import(specifier);
+            if (
+              typeof imported.readFileSync === "function" ||
+              typeof imported.default?.readFileSync === "function" ||
+              typeof imported.env === "object"
+            ) {
+              return { leaked: specifier };
+            }
+          } catch {
+            // Expected: untrusted execution cannot resolve host modules.
+          }
+        }
+        return { blocked: true };
+      }`,
+      {},
+    );
+
+    expect(result).toMatchObject({ ok: true, value: { blocked: true } });
+  });
+
   it("returns a typed timeout when guest code exceeds the wall-time limit", async () => {
     const runtime = new LlrtRuntime({ wallTimeMs: 1, memoryMB: 8 });
 

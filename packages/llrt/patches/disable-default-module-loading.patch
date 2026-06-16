@@ -1,0 +1,98 @@
+diff --git a/llrt_core/src/vm.rs b/llrt_core/src/vm.rs
+index c323af3..88f7b6c 100644
+--- a/llrt_core/src/vm.rs
++++ b/llrt_core/src/vm.rs
+@@ -34,6 +34,7 @@ pub struct Vm {
+ 
+ pub struct VmOptions {
+     pub module_builder: ModuleBuilder,
++    pub allow_module_loading: bool,
+     pub max_stack_size: usize,
+     pub gc_threshold_mb: usize,
+ }
+@@ -58,6 +59,7 @@ impl Default for VmOptions {
+ 
+         Self {
+             module_builder,
++            allow_module_loading: true,
+             max_stack_size: 512 * 1024,
+             gc_threshold_mb: {
+                 const DEFAULT_GC_THRESHOLD_MB: usize = 20;
+@@ -82,40 +84,48 @@ impl Vm {
+         http::init()?;
+         security::init()?;
+ 
+-        let mut file_resolver = FileResolver::default();
+-        let mut paths: Vec<&str> = Vec::with_capacity(10);
+-
+-        paths.push(".");
+-
+-        let task_root = env::var(Self::ENV_LAMBDA_TASK_ROOT).unwrap_or_else(|_| String::from(""));
+-        let task_root = task_root.as_str();
+-        if cfg!(debug_assertions) {
+-            paths.push("bundle");
+-        } else {
+-            paths.push("/opt");
+-        }
+-
+-        if !task_root.is_empty() {
+-            paths.push(task_root);
+-        }
+-
+-        for path in paths.iter() {
+-            file_resolver.add_path(*path);
+-        }
+-
+         let (module_resolver, module_loader, global_attachment) = vm_options.module_builder.build();
+-        let resolver = (
+-            module_resolver,
+-            EmbeddedResolver,
+-            PackageResolver,
+-            file_resolver,
+-        );
+-        let loader = (module_loader, EmbeddedLoader, PackageLoader);
+ 
+         let runtime = AsyncRuntime::new()?;
+         runtime.set_max_stack_size(vm_options.max_stack_size).await;
+         runtime.set_gc_threshold(vm_options.gc_threshold_mb).await;
+-        runtime.set_loader(resolver, loader).await;
++        if vm_options.allow_module_loading {
++            let mut file_resolver = FileResolver::default();
++            let mut paths: Vec<&str> = Vec::with_capacity(10);
++
++            paths.push(".");
++
++            let task_root =
++                env::var(Self::ENV_LAMBDA_TASK_ROOT).unwrap_or_else(|_| String::from(""));
++            let task_root = task_root.as_str();
++            if cfg!(debug_assertions) {
++                paths.push("bundle");
++            } else {
++                paths.push("/opt");
++            }
++
++            if !task_root.is_empty() {
++                paths.push(task_root);
++            }
++
++            for path in paths.iter() {
++                file_resolver.add_path(*path);
++            }
++
++            runtime
++                .set_loader(
++                    (
++                        module_resolver,
++                        EmbeddedResolver,
++                        PackageResolver,
++                        file_resolver,
++                    ),
++                    (module_loader, EmbeddedLoader, PackageLoader),
++                )
++                .await;
++        } else {
++            runtime.set_loader(module_resolver, module_loader).await;
++        }
+ 
+         let ctx = AsyncContext::full(&runtime).await?;
+         ctx.with(|ctx| {

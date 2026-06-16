@@ -1,5 +1,9 @@
 import { createExecutor } from "./executor/auto.js";
-import { createRequestBridge, type SandboxRequestOptions } from "./request-bridge.js";
+import {
+  createRequestBridge,
+  type RequestBridgeOptions,
+  type SandboxRequestOptions,
+} from "./request-bridge.js";
 import { extractTags, processSpec } from "./spec.js";
 import { createExecuteToolDefinition, createSearchToolDefinition } from "./tools.js";
 import { truncateResponse } from "./truncate.js";
@@ -79,7 +83,7 @@ export class CodeMode {
   // so the request counter resets each time.
   private bridgeHandler: RequestHandler;
   private bridgeBaseUrl: string;
-  private bridgeOptions: { maxRequests?: number; maxResponseBytes?: number; allowedHeaders?: string[] };
+  private bridgeOptions: RequestBridgeOptions;
 
   // Cached processed spec & context for tool descriptions
   private processedSpec: Record<string, unknown> | null = null;
@@ -102,6 +106,7 @@ export class CodeMode {
       maxRequests: options.maxRequests,
       maxResponseBytes: options.maxResponseBytes,
       allowedHeaders: options.allowedHeaders,
+      exposedResponseHeaders: options.exposedResponseHeaders,
     };
   }
 

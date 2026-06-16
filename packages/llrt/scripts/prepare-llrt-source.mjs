@@ -10,9 +10,11 @@ const LLRT_REVISION = "80c113ddee03ff1926068193f50fe35f41ca2105";
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const vendorRoot = resolve(packageRoot, "vendor");
 const llrtRoot = resolve(vendorRoot, "llrt");
+const patchesRoot = resolve(packageRoot, "patches");
 
 await mkdir(vendorRoot, { recursive: true });
 await ensureCheckout();
+await applyLocalPatches();
 await ensureGeneratedBundle();
 
 async function ensureCheckout() {
@@ -32,6 +34,31 @@ async function ensureCheckout() {
 
   run("git", ["fetch", "--depth=1", "origin", LLRT_REVISION], llrtRoot);
   run("git", ["checkout", "--detach", LLRT_REVISION], llrtRoot);
+}
+
+async function applyLocalPatches() {
+  applyPatchOnce(resolve(patchesRoot, "disable-default-module-loading.patch"));
+}
+
+function applyPatchOnce(patchPath) {
+  const checkResult = spawnSync("git", ["apply", "--check", patchPath], {
+    cwd: llrtRoot,
+    stdio: "ignore",
+  });
+  if (checkResult.status === 0) {
+    run("git", ["apply", patchPath], llrtRoot);
+    return;
+  }
+
+  const reverseCheckResult = spawnSync("git", ["apply", "--reverse", "--check", patchPath], {
+    cwd: llrtRoot,
+    stdio: "ignore",
+  });
+  if (reverseCheckResult.status === 0) {
+    return;
+  }
+
+  throw new Error(`Unable to apply LLRT patch: ${patchPath}`);
 }
 
 async function ensureGeneratedBundle() {

@@ -1,6 +1,6 @@
 {
   "name": "@robinbraemer/llrt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript-friendly Node bindings for AWS LLRT.",
   "type": "module",
   "main": "./dist/index.js",
@@ -46,6 +46,11 @@
   ],
   "author": "Robin Braemer",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cnap-tech/codemode.git",
+    "directory": "packages/llrt"
+  },
   "napi": {
     "binaryName": "llrt_node",
     "targets": [
