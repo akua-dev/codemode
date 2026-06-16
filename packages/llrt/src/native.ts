@@ -135,3 +135,20 @@ export function loadNativeBinding(): NativeBinding {
     llrtError: errorInfo("NATIVE_LOAD_ERROR", errors.at(-1) ?? "No native candidates tried"),
   });
 }
+
+export function isNativeBindingAvailable(): boolean {
+  return getNativeBindingAvailability().available;
+}
+
+export type NativeBindingAvailability =
+  | { available: true }
+  | { available: false; error: unknown };
+
+export function getNativeBindingAvailability(): NativeBindingAvailability {
+  try {
+    loadNativeBinding();
+    return { available: true };
+  } catch (error) {
+    return { available: false, error };
+  }
+}

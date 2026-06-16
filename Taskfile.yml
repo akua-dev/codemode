@@ -37,6 +37,7 @@ tasks:
     desc: Lint and type-check
     cmds:
       - pnpm oxlint
+      - pnpm --filter @robinbraemer/llrt run build
       - pnpm -r run typecheck
 
   example:

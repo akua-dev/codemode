@@ -34,6 +34,16 @@ describe("LLRT native prebuild workflow", () => {
     expect(workflow).toContain("pnpm --filter @robinbraemer/llrt publish --access public --no-git-checks");
   });
 
+  it("installs only the LLRT workspace in native packaging jobs", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const scopedInstallMatches = workflow.match(
+      /pnpm install --filter @robinbraemer\/llrt\.\.\./g,
+    );
+
+    expect(scopedInstallMatches).toHaveLength(2);
+    expect(workflow).not.toContain("task install");
+  });
+
   it("passes the native build target through an explicit environment variable", () => {
     const workflow = readFileSync(workflowPath, "utf8");
 

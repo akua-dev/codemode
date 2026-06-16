@@ -1,12 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { LlrtNativeExecutor } from "../src/executor/llrt-native.js";
 import { executorContract } from "./executor-contract.js";
+import {
+  describeWithLlrtNativeBinding as describe,
+  llrtNativeBindingAvailable,
+} from "./llrt-native-test-helper.js";
 
-executorContract(
-  "LlrtNativeExecutor",
-  (opts) => new LlrtNativeExecutor(opts),
-  { memoryStress: { memoryMB: 1, iterations: 100_000 } },
-);
+if (llrtNativeBindingAvailable) {
+  executorContract(
+    "LlrtNativeExecutor",
+    (opts) => new LlrtNativeExecutor(opts),
+    { memoryStress: { memoryMB: 1, iterations: 100_000 } },
+  );
+} else {
+  describe.skip("LlrtNativeExecutor", () => {
+    it("requires a built LLRT native binding", () => {});
+  });
+}
 
 describe("LlrtNativeExecutor", () => {
   it("executes code with JSON-safe globals through the native LLRT runtime", async () => {

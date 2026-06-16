@@ -1,8 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  getNativeBindingAvailability,
+  isNativeBindingAvailable,
+  setNativeBindingForTest,
+  type NativeBinding,
   nativeBindingCandidates,
   nativePackageNameForPlatform,
 } from "../src/native.js";
+
+afterEach(() => {
+  setNativeBindingForTest(undefined);
+});
 
 describe("native loader", () => {
   it("uses napi-rs platform package names for optional native installs", () => {
@@ -36,5 +44,35 @@ describe("native loader", () => {
       kind: "package",
       specifier: "@robinbraemer/llrt-darwin-arm64",
     });
+  });
+
+  it("reports whether the native binding can be loaded", () => {
+    const binding: NativeBinding = {
+      nativeSmoke() {
+        return "llrt-native-ok";
+      },
+      callJson() {
+        return Promise.resolve({
+          ok: true,
+          valueJson: "null",
+          stats: {
+            wallTimeMs: 0,
+            cpuTimeMs: null,
+            memoryUsedBytes: null,
+            memoryLimitBytes: null,
+            maxStackBytes: null,
+          },
+        });
+      },
+      dispose() {},
+    };
+
+    setNativeBindingForTest(binding);
+    expect(isNativeBindingAvailable()).toBe(true);
+    expect(getNativeBindingAvailability()).toEqual({ available: true });
+
+    setNativeBindingForTest(null);
+    expect(isNativeBindingAvailable()).toBe(false);
+    expect(getNativeBindingAvailability()).toMatchObject({ available: false });
   });
 });

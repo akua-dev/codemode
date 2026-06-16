@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { LlrtRuntime } from "../src/index.js";
+import { describeWithNativeBinding as describe } from "./native-test-helper.js";
 
 describe("LlrtRuntime.callJson native execution", () => {
   it("executes an async guest function with JSON input and output", async () => {

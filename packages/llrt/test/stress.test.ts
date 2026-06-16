@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { LlrtRuntime } from "../src/index.js";
+import { describeWithNativeBinding as describe } from "./native-test-helper.js";
 
 describe("LlrtRuntime stress behavior", () => {
   it("applies per-call memory limits independently of the runtime default", async () => {

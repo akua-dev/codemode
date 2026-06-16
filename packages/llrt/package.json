@@ -31,6 +31,7 @@
     "prepublish:native-packages:dry-run": "napi pre-publish --npm-dir npm --tag-style npm --dry-run",
     "smoke:packed-install": "node scripts/smoke-packed-install.mjs",
     "test": "vitest run",
+    "test:native": "LLRT_REQUIRE_NATIVE_TESTS=1 vitest run test/native-smoke.test.ts test/call-json.test.ts test/stress.test.ts",
     "typecheck": "tsc --noEmit",
     "verify:native-artifacts": "node scripts/verify-native-artifacts.mjs",
     "verify:native-artifacts:strict": "node scripts/verify-native-artifacts.mjs --require-binaries",
