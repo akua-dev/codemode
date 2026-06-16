@@ -8,6 +8,17 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
 
 describe("LLRT package publication docs", () => {
+  it("uses a publishable initial package and native crate version", () => {
+    const cargoToml = readFileSync(join(packageRoot, "native", "Cargo.toml"), "utf8");
+    const cargoPackageVersion = cargoToml.match(
+      /\[package]\s+name = "llrt_node"\s+version = "([^"]+)"/,
+    )?.[1];
+
+    expect(packageJson.version).toMatch(/^(?!0\.0\.0$)\d+\.\d+\.\d+(?:[-+].*)?$/);
+    expect(packageJson.version).not.toBe("0.0.0");
+    expect(cargoPackageVersion).toBe(packageJson.version);
+  });
+
   it("documents install, supported native packages, Node support, and unsupported runtimes", () => {
     expect(readme).toContain("npm install @robinbraemer/llrt");
     expect(readme).toContain("Node.js 24");
