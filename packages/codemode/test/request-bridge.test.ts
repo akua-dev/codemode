@@ -136,6 +136,68 @@ describe("request limits", () => {
       }),
     ).rejects.toThrow("Request body too large");
   });
+
+  it("enforces maxConcurrentRequests", async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markHandlerRunning: (() => void) | undefined;
+    const handlerIsRunning = new Promise<void>((resolve) => {
+      markHandlerRunning = resolve;
+    });
+    const handler: RequestHandler = async () => {
+      markHandlerRunning?.();
+      await firstMayFinish;
+      return Response.json({ ok: true });
+    };
+    const bridge = createRequestBridge(handler, "http://localhost", {
+      maxConcurrentRequests: 1,
+    });
+
+    const first = bridge({ method: "GET", path: "/slow" });
+    await handlerIsRunning;
+
+    await expect(
+      bridge({ method: "GET", path: "/second" }),
+    ).rejects.toThrow("Concurrent request limit exceeded");
+
+    releaseFirst?.();
+    await first;
+  });
+
+  it("forwards abort signals and releases the in-flight slot after abort", async () => {
+    let sawSignal = false;
+    const handler: RequestHandler = async (input, init) => {
+      const url = typeof input === "string" ? new URL(input) : new URL(input.url);
+      if (url.pathname === "/next") {
+        return Response.json({ ok: true });
+      }
+      sawSignal = init?.signal instanceof AbortSignal;
+      await new Promise<void>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      });
+      return Response.json({ ok: true });
+    };
+    const bridge = createRequestBridge(handler, "http://localhost", {
+      maxConcurrentRequests: 1,
+    });
+    const abortController = new AbortController();
+
+    const first = bridge(
+      { method: "GET", path: "/slow" },
+      { signal: abortController.signal },
+    );
+    abortController.abort();
+
+    await expect(first).rejects.toThrow(/aborted|Request aborted/);
+    expect(sawSignal).toBe(true);
+    await expect(bridge({ method: "GET", path: "/next" })).resolves.toMatchObject({
+      status: 200,
+    });
+  });
 });
 
 describe("header filtering", () => {

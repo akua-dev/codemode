@@ -29,11 +29,11 @@ Fetches the real Petstore OpenAPI spec from the web, then runs search + execute 
 pnpm add @robinbraemer/codemode
 
 # Install a sandbox runtime (at least one):
-pnpm add isolated-vm           # V8 isolates — recommended for production on Node
-pnpm add quickjs-emscripten    # WASM QuickJS — fallback for Bun / CF Workers / browser
+pnpm add @robinbraemer/llrt    # Native LLRT — default candidate
+pnpm add isolated-vm           # V8 isolates — data-only Node.js fallback
 ```
 
-If both are installed, the auto-selector (`createExecutor`) picks `isolated-vm` on Node and `quickjs-emscripten` on Bun (where `isolated-vm` cannot dlopen because Bun's JavaScriptCore engine does not export the V8 symbols `isolated-vm` requires).
+If both are installed, the auto-selector (`createExecutor`) picks native LLRT first, then `isolated-vm` on Node for data-only execution. Request-capable execution requires LLRT. `QuickJSExecutor` is still exported for explicit advanced use, but it is not selected automatically because its host-callback bridge cannot enforce all byte limits before values cross into host JavaScript.
 
 ## Quick Start
 
@@ -114,7 +114,7 @@ CodeMode MCP Server
       → no network hop, auth handled automatically
 ```
 
-All code runs in an isolated V8 sandbox. The sandbox has zero I/O by default — no `require`, no `process`, no `fetch`, no filesystem. The only way to interact with the outside world is through the injected globals (`spec` for search, `{namespace}.request()` for execute).
+All code runs in a fresh sandbox runtime. The sandbox has zero I/O by default — no `require`, no `process`, no `fetch`, no filesystem. Request-capable execution uses injected host callbacks (`spec` for search, `{namespace}.request()` for execute) and is supported by LLRT.
 
 Each tool call gets a fresh sandbox with no state carried over between calls.
 
@@ -129,7 +129,7 @@ Each tool call gets a fresh sandbox with no state carried over between calls.
 | `namespace` | `string` | `"api"` | Client name in sandbox (`api.request(...)`). Must be a valid JS identifier, not a reserved name. |
 | `baseUrl` | `string` | `"http://localhost"` | Base URL for relative paths |
 | `sandbox` | `SandboxOptions` | see below | Sandbox resource limits |
-| `executor` | `Executor` | `IsolatedVMExecutor` | Custom sandbox executor |
+| `executor` | `Executor` | `createExecutor()` | Custom sandbox executor |
 | `maxResponseTokens` | `number` | `25000` | Token limit for response truncation (0 to disable) |
 | `maxRequests` | `number` | `50` | Max requests per `execute()` call |
 | `maxResponseBytes` | `number` | `10485760` | Max response body size in bytes (10MB) |
@@ -140,7 +140,7 @@ Each tool call gets a fresh sandbox with no state carried over between calls.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `memoryMB` | `number` | `64` | V8 isolate memory limit |
+| `memoryMB` | `number` | `64` | Sandbox heap memory limit |
 | `timeoutMs` | `number` | `30000` | CPU timeout in ms (caps pure compute) |
 | `wallTimeMs` | `number` | `60000` | Wall-clock timeout in ms (caps total elapsed time including async I/O) |
 
@@ -272,14 +272,14 @@ const tags = extractTags(rawSpec);
 
 ## Executors
 
-CodeMode ships two executor backends. `IsolatedVMExecutor` is the recommended production backend on Node. `QuickJSExecutor` is a compatibility fallback for environments where `isolated-vm` cannot load (Bun, Cloudflare Workers, browser).
+CodeMode ships three executor backends. `LlrtNativeExecutor` is the default and the only request-capable backend. `IsolatedVMExecutor` is the Node.js data-only fallback, and `QuickJSExecutor` is an explicit data-only compatibility backend.
 
 Use `createExecutor()` for automatic selection, or pass an executor instance explicitly:
 
 ```typescript
-import { CodeMode, createExecutor, IsolatedVMExecutor, QuickJSExecutor } from '@robinbraemer/codemode';
+import { CodeMode, createExecutor, IsolatedVMExecutor, LlrtNativeExecutor } from '@robinbraemer/codemode';
 
-// Automatic — picks isolated-vm on Node, quickjs-emscripten on Bun
+// Automatic — picks native LLRT first, then data-only isolated-vm on Node
 const codemode = new CodeMode({
   spec,
   request: handler,
@@ -300,15 +300,16 @@ const codemode = new CodeMode({
 
 | Executor | Package | Performance | Portability | Production-ready |
 |----------|---------|-------------|-------------|------------------|
-| `IsolatedVMExecutor` | `isolated-vm` | Native V8 speed | Node.js | ✅ |
-| `QuickJSExecutor` | `quickjs-emscripten` | Slower (interpreted WASM) | Node, Bun, CF Workers, browser | ⚠️ fallback only — see caveats |
+| `LlrtNativeExecutor` | `@robinbraemer/llrt` | Lightweight native LLRT | Node.js | ✅ default candidate |
+| `IsolatedVMExecutor` | `isolated-vm` | Native V8 speed | Node.js | ⚠️ data-only fallback |
+| `QuickJSExecutor` | `quickjs-emscripten` | Slower (interpreted WASM) | Node, Bun, CF Workers, browser | ⚠️ explicit only — see caveats |
 
 ### `QuickJSExecutor` caveats
 
-- **Not a production backend.** Exists so the package loads on runtimes where `isolated-vm` cannot dlopen. Production callers on Node should use `IsolatedVMExecutor`.
-- **Sandboxed code must avoid sequential `await` on host functions.** Use `Promise.all([fn1(), fn2()])` for parallel calls instead. Chained sequential `await`s currently crash with an upstream `quickjs-emscripten@0.32.0` release-asyncify regression ([justjake/quickjs-emscripten#258](https://github.com/justjake/quickjs-emscripten/issues/258)) — reproduces identically on Node and Bun.
-- **Return-value semantics differ from `isolated-vm`.** Host ↔ guest values cross via a `JSON.stringify` envelope. `Date`, `Map`, `Set`, `BigInt` are converted to strings/objects, not preserved as instances. `isolated-vm` uses structured clone and preserves them. Stick to plain JSON-safe shapes in sandboxed code that targets both backends.
-- **CPU timeout is wall-clock-based.** `isolated-vm` uses true CPU time; QuickJS uses elapsed time. Async host calls that take wall time count against the CPU budget under QuickJS.
+- **Not a production backend and not auto-selected.** Use this only by constructing `new QuickJSExecutor(...)` explicitly. Production request-capable callers should use `LlrtNativeExecutor`.
+- **Host callbacks are disabled.** QuickJS cannot enforce host-call byte limits before guest values are dumped into host JavaScript, and sequential host awaits still hit upstream release-asyncify crashes. `QuickJSExecutor` now fails closed when function globals are provided.
+- **Return-value semantics differ from `isolated-vm`.** Final values cross via a `JSON.stringify` envelope. `Date`, `Map`, `Set`, `BigInt` are converted to strings/objects, not preserved as instances. `isolated-vm` uses structured clone and preserves them. Stick to plain JSON-safe shapes in sandboxed code that targets both backends.
+- **CPU timeout is wall-clock-based.** `isolated-vm` uses true CPU time; QuickJS uses elapsed time.
 
 ### Custom Executor
 

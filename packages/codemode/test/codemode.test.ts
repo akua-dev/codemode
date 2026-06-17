@@ -1,10 +1,52 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { CodeMode } from "../src/codemode.js";
-import type { Executor, ExecuteResult } from "../src/types.js";
+import type {
+  CapabilityManifest,
+  Executor,
+  ExecuteResult,
+} from "../src/types.js";
 
 // A simple in-memory executor for testing (no sandbox dependency needed)
 class TestExecutor implements Executor {
+  calls = 0;
+  dataCalls = 0;
+  capabilityCalls = 0;
+
   async execute(
+    code: string,
+    globals: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    this.calls += 1;
+    return await this.runCode(code, globals);
+  }
+
+  async executeData(
+    code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    this.dataCalls += 1;
+    return await this.runCode(code, input);
+  }
+
+  async executeWithCapabilities(
+    code: string,
+    input: Record<string, unknown>,
+    capabilities: CapabilityManifest,
+  ): Promise<ExecuteResult> {
+    this.capabilityCalls += 1;
+    const globals: Record<string, unknown> = { ...input };
+    for (const [namespace, methods] of Object.entries(capabilities.namespaces)) {
+      const namespaceValue: Record<string, unknown> = {};
+      for (const [method, capability] of Object.entries(methods)) {
+        namespaceValue[method] = (...args: unknown[]) =>
+          capability.call.apply({ signal: new AbortController().signal }, args);
+      }
+      globals[namespace] = namespaceValue;
+    }
+    return await this.runCode(code, globals);
+  }
+
+  private async runCode(
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
@@ -192,6 +234,43 @@ describe("CodeMode", () => {
       expect(result.isError).toBe(true);
     });
 
+    it("rejects oversized code before invoking the executor", async () => {
+      const executor = new TestExecutor();
+      const cm = new CodeMode({
+        spec: testSpec,
+        request: testHandler,
+        executor,
+        maxCodeBytes: 12,
+      });
+
+      const result = await cm.search(`async () => "this is too large"`);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("Code too large");
+      expect(executor.calls).toBe(0);
+    });
+
+    it("runs search in data-only mode", async () => {
+      const executor = new TestExecutor();
+      const cm = new CodeMode({
+        spec: testSpec,
+        request: testHandler,
+        executor,
+      });
+
+      const result = await cm.search(`
+        async () => ({ pathCount: Object.keys(spec.paths).length, request: typeof api })
+      `);
+
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(result.content[0]!.text)).toEqual({
+        pathCount: 3,
+        request: "undefined",
+      });
+      expect(executor.dataCalls).toBe(1);
+      expect(executor.calls).toBe(0);
+    });
+
     it("supports spec as async getter", async () => {
       const cm = new CodeMode({
         spec: async () => testSpec,
@@ -260,6 +339,15 @@ describe("CodeMode", () => {
 
       const data = JSON.parse(result.content[0]!.text);
       expect(data.status).toBe(404);
+    });
+
+    it("returns a controlled error for non-JSON-serializable results", async () => {
+      const result = await codemode.execute(`
+        async () => 1n
+      `);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("Result serialization failed");
     });
 
     it("respects custom namespace", async () => {

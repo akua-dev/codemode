@@ -27,6 +27,8 @@ export interface SandboxResponse {
 export interface RequestBridgeOptions {
   /** Maximum number of requests per bridge instance. Default: 50. */
   maxRequests?: number;
+  /** Maximum number of in-flight requests per bridge instance. Default: 8. */
+  maxConcurrentRequests?: number;
   /** Maximum request body size in bytes. Default: 1MB. */
   maxRequestBytes?: number;
   /** Maximum response body size in bytes. Default: 10MB. */
@@ -69,6 +71,7 @@ const BLOCKED_HEADER_PATTERNS = [
 ];
 
 const DEFAULT_MAX_REQUESTS = 50;
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 8;
 const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024; // 1MB
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10MB
 
@@ -123,9 +126,10 @@ async function readResponseWithLimit(
   if (!reader) {
     // No body stream — fall back to .text() (e.g., empty responses)
     const text = await abortable(response.text(), signal);
-    if (text.length > maxBytes) {
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > maxBytes) {
       throw new Error(
-        `Response too large: ${text.length} bytes exceeds limit of ${maxBytes} bytes`,
+        `Response too large: ${bytes} bytes exceeds limit of ${maxBytes} bytes`,
       );
     }
     return text;
@@ -262,6 +266,7 @@ export function createRequestBridge(
   options: RequestBridgeOptions = {},
 ): RequestBridgeFn {
   const maxRequests = options.maxRequests ?? DEFAULT_MAX_REQUESTS;
+  const maxConcurrentRequests = options.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS;
   const maxRequestBytes = options.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const allowedHeaders = options.allowedHeaders
@@ -272,6 +277,7 @@ export function createRequestBridge(
     : undefined;
 
   let requestCount = 0;
+  let inFlightRequests = 0;
 
   const bridge = async (
     opts: SandboxRequestOptions,
@@ -287,79 +293,89 @@ export function createRequestBridge(
         `Request limit exceeded: max ${maxRequests} requests per execution`,
       );
     }
-
-    // Validate HTTP method
-    const upperMethod = method.toUpperCase();
-    if (!ALLOWED_METHODS.has(upperMethod)) {
+    if (inFlightRequests >= maxConcurrentRequests) {
       throw new Error(
-        `Invalid HTTP method: "${method}". Allowed: ${[...ALLOWED_METHODS].join(", ")}`,
+        `Concurrent request limit exceeded: max ${maxConcurrentRequests} in-flight requests per execution`,
       );
     }
+    inFlightRequests += 1;
 
-    // Validate path (SSRF prevention)
-    validatePath(path);
-
-    // Build URL
-    const url = new URL(path, baseUrl);
-    if (query) {
-      for (const [key, value] of Object.entries(query)) {
-        url.searchParams.set(key, String(value));
-      }
-    }
-
-    // Filter headers
-    const filteredHeaders = filterHeaders(headers, allowedHeaders);
-
-    // Build request init
-    const init: RequestInit = {
-      method: upperMethod,
-      headers: { ...filteredHeaders },
-      signal,
-    };
-
-    if (body !== undefined && body !== null) {
-      const bodyJson = JSON.stringify(body);
-      const bodyBytes = utf8ByteLength(bodyJson);
-      if (bodyBytes > maxRequestBytes) {
+    try {
+      // Validate HTTP method
+      const upperMethod = method.toUpperCase();
+      if (!ALLOWED_METHODS.has(upperMethod)) {
         throw new Error(
-          `Request body too large: ${bodyBytes} bytes exceeds limit of ${maxRequestBytes} bytes`,
+          `Invalid HTTP method: "${method}". Allowed: ${[...ALLOWED_METHODS].join(", ")}`,
         );
       }
-      init.body = bodyJson;
-      (init.headers as Record<string, string>)["content-type"] =
-        (init.headers as Record<string, string>)["content-type"] ?? "application/json";
-    }
 
-    // Call the host handler
-    const response = await abortable(
-      Promise.resolve(handler(url.toString(), init)),
-      signal,
-    );
-    throwIfAborted(signal);
+      // Validate path (SSRF prevention)
+      validatePath(path);
 
-    const responseHeaders = filterResponseHeaders(response.headers, exposedResponseHeaders);
+      // Build URL
+      const url = new URL(path, baseUrl);
+      if (query) {
+        for (const [key, value] of Object.entries(query)) {
+          url.searchParams.set(key, String(value));
+        }
+      }
 
-    // Read response body with streaming size limit to avoid host OOM.
-    // Abort as soon as accumulated bytes exceed the limit.
-    const contentType = response.headers.get("content-type") ?? "";
-    const text = await readResponseWithLimit(response, maxResponseBytes, signal);
+      // Filter headers
+      const filteredHeaders = filterHeaders(headers, allowedHeaders);
 
-    let responseBody: unknown;
-    if (contentType.includes("application/json")) {
-      try {
-        responseBody = JSON.parse(text);
-      } catch {
+      // Build request init
+      const init: RequestInit = {
+        method: upperMethod,
+        headers: { ...filteredHeaders },
+        signal,
+      };
+
+      if (body !== undefined && body !== null) {
+        const bodyJson = JSON.stringify(body);
+        const bodyBytes = utf8ByteLength(bodyJson);
+        if (bodyBytes > maxRequestBytes) {
+          throw new Error(
+            `Request body too large: ${bodyBytes} bytes exceeds limit of ${maxRequestBytes} bytes`,
+          );
+        }
+        init.body = bodyJson;
+        (init.headers as Record<string, string>)["content-type"] =
+          (init.headers as Record<string, string>)["content-type"] ?? "application/json";
+      }
+
+      // Call the host handler
+      const response = await abortable(
+        Promise.resolve(handler(url.toString(), init)),
+        signal,
+      );
+      throwIfAborted(signal);
+
+      const responseHeaders = filterResponseHeaders(response.headers, exposedResponseHeaders);
+
+      // Read response body with streaming size limit to avoid host OOM.
+      // Abort as soon as accumulated bytes exceed the limit.
+      const contentType = response.headers.get("content-type") ?? "";
+      const text = await readResponseWithLimit(response, maxResponseBytes, signal);
+
+      let responseBody: unknown;
+      if (contentType.includes("application/json")) {
+        try {
+          responseBody = JSON.parse(text);
+        } catch {
+          responseBody = text;
+        }
+      } else {
         responseBody = text;
       }
-    } else {
-      responseBody = text;
-    }
 
-    return {
-      status: response.status,
-      headers: responseHeaders,
-      body: responseBody,
-    };
+      return {
+        status: response.status,
+        headers: responseHeaders,
+        body: responseBody,
+      };
+    } finally {
+      inFlightRequests -= 1;
+    }
   };
 
   Object.defineProperty(bridge, 'requestCount', {

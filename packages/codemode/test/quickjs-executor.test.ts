@@ -6,8 +6,33 @@ executorContract(
   "QuickJSExecutor",
   (opts) => new QuickJSExecutor(opts),
   // quickjs OOMs at a lower limit with a tighter loop than V8.
-  { memoryStress: { memoryMB: 4, iterations: 1_000_000 } },
+  {
+    memoryStress: { memoryMB: 4, iterations: 1_000_000 },
+    supportsHostFunctions: false,
+  },
 );
+
+it("fails closed when host functions are provided", async () => {
+  const executor = new QuickJSExecutor({ memoryMB: 8, wallTimeMs: 20 });
+
+  const result = await executor.execute(
+    `async () => {
+      await api.request({ path: "/slow" });
+    }`,
+    {
+      api: {
+        request: async function (
+          this: { signal?: AbortSignal },
+          _request: { path: string },
+        ) {
+          return { status: 499, body: { aborted: true } };
+        },
+      },
+    },
+  );
+
+  expect(result.error).toContain("does not support host functions");
+});
 
 // ─── Cross-backend tests ────────────────────────────────────────────────────
 // These compare BOTH backends side-by-side and therefore cannot live in the
@@ -16,7 +41,8 @@ executorContract(
 
 describe("ExecuteStats shape parity (QuickJS vs IsolatedVM)", () => {
   it("both executors produce ExecuteStats with the same keys", async () => {
-    const { IsolatedVMExecutor } = await import("../src/executor/isolated-vm.js");
+    const IsolatedVMExecutor = await loadIsolatedVMExecutorOrSkip();
+    if (!IsolatedVMExecutor) return;
     const code = `async () => { let s = 0; for (let i = 0; i < 100; i++) s += i; return s; }`;
 
     const ivmExec = new IsolatedVMExecutor();
@@ -45,16 +71,9 @@ describe("ExecuteStats shape parity (QuickJS vs IsolatedVM)", () => {
     }
   });
 
-  it("documents the return-value semantic divergence (structured clone vs JSON)", async () => {
-    // isolated-vm uses structured clone (`{ copy: true }`) — preserves Date,
-    // Map, Set, BigInt as their original types. QuickJSExecutor uses a
-    // JSON.stringify envelope as a workaround for upstream GC-anchoring bugs
-    // in quickjs-emscripten@0.32.0 release-asyncify, so those types degrade
-    // to their JSON representation.
-    //
-    // This test locks the divergence so any future change (e.g. an upstream
-    // fix that lets us drop the JSON envelope) breaks loudly.
-    const { IsolatedVMExecutor } = await import("../src/executor/isolated-vm.js");
+  it("returns JSON-safe final values from both backends", async () => {
+    const IsolatedVMExecutor = await loadIsolatedVMExecutorOrSkip();
+    if (!IsolatedVMExecutor) return;
     const code = `async () => new Date("2026-01-15T00:00:00Z")`;
 
     const ivmExec = new IsolatedVMExecutor();
@@ -66,12 +85,20 @@ describe("ExecuteStats shape parity (QuickJS vs IsolatedVM)", () => {
     expect(ivmRes.error).toBeUndefined();
     expect(qjsRes.error).toBeUndefined();
 
-    // isolated-vm: structured clone preserves the Date instance.
-    expect(ivmRes.result).toBeInstanceOf(Date);
-    expect((ivmRes.result as Date).toISOString()).toBe("2026-01-15T00:00:00.000Z");
-
-    // QuickJS: JSON envelope returns the date as an ISO-8601 string.
+    expect(typeof ivmRes.result).toBe("string");
+    expect(ivmRes.result).toBe("2026-01-15T00:00:00.000Z");
     expect(typeof qjsRes.result).toBe("string");
     expect(qjsRes.result).toBe("2026-01-15T00:00:00.000Z");
   });
 });
+
+async function loadIsolatedVMExecutorOrSkip() {
+  try {
+    const { IsolatedVMExecutor } = await import("../src/executor/isolated-vm.js");
+    const probe = new IsolatedVMExecutor({ memoryMB: 8, wallTimeMs: 1000 });
+    await probe.execute(`async () => true`, {});
+    return IsolatedVMExecutor;
+  } catch {
+    return undefined;
+  }
+}

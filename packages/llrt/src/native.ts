@@ -26,6 +26,10 @@ export interface NativeRuntimeOptions {
   wallTimeMs?: number;
   cpuTimeMs?: number;
   maxStackBytes?: number;
+  maxHostPayloadBytes?: number;
+  maxResultBytes?: number;
+  errorMarker?: string;
+  hostPaths?: string[];
 }
 
 export interface NativeBinding {

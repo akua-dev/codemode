@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { CodeMode } from "../src/codemode.js";
-import type { Executor, ExecuteResult } from "../src/types.js";
+import type {
+  CapabilityManifest,
+  Executor,
+  ExecuteResult,
+} from "../src/types.js";
 
 const PETSTORE_BASE = "https://petstore3.swagger.io";
 
@@ -22,6 +26,37 @@ const petstoreSpec = {
 
 class TestExecutor implements Executor {
   async execute(
+    code: string,
+    globals: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    return await this.runCode(code, globals);
+  }
+
+  async executeData(
+    code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    return await this.runCode(code, input);
+  }
+
+  async executeWithCapabilities(
+    code: string,
+    input: Record<string, unknown>,
+    capabilities: CapabilityManifest,
+  ): Promise<ExecuteResult> {
+    const globals: Record<string, unknown> = { ...input };
+    for (const [namespace, methods] of Object.entries(capabilities.namespaces)) {
+      const namespaceValue: Record<string, unknown> = {};
+      for (const [method, capability] of Object.entries(methods)) {
+        namespaceValue[method] = (...args: unknown[]) =>
+          capability.call.apply({ signal: new AbortController().signal }, args);
+      }
+      globals[namespace] = namespaceValue;
+    }
+    return await this.runCode(code, globals);
+  }
+
+  private async runCode(
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {

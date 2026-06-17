@@ -4,6 +4,10 @@ declare module "@robinbraemer/llrt" {
     wallTimeMs?: number;
     cpuTimeMs?: number;
     maxStackBytes?: number;
+    maxHostCalls?: number;
+    maxHostPayloadBytes?: number;
+    maxHostResultBytes?: number;
+    maxResultBytes?: number;
   }
 
   interface LlrtCallOptions {
@@ -11,10 +15,25 @@ declare module "@robinbraemer/llrt" {
     wallTimeMs?: number;
     cpuTimeMs?: number;
     maxStackBytes?: number;
+    maxHostCalls?: number;
+    maxHostPayloadBytes?: number;
+    maxHostResultBytes?: number;
+    maxResultBytes?: number;
     functions?: Record<string, LlrtHostFunction>;
   }
 
-  type LlrtHostFunction = (...args: unknown[]) => unknown | Promise<unknown>;
+  interface LlrtHostCallContext {
+    signal: AbortSignal;
+  }
+
+  type LlrtHostFunction = (
+    this: LlrtHostCallContext,
+    ...args: unknown[]
+  ) => unknown | Promise<unknown>;
+
+  interface LlrtHostManifest {
+    namespaces: Record<string, Record<string, LlrtHostFunction>>;
+  }
 
   interface LlrtStats {
     wallTimeMs: number;
@@ -38,6 +57,13 @@ declare module "@robinbraemer/llrt" {
       source: string,
       input: TInput,
       options?: LlrtCallOptions,
+    ): Promise<LlrtResult<TOutput>>;
+
+    callJsonWithHost<TInput = unknown, TOutput = unknown>(
+      source: string,
+      input: TInput,
+      manifest: LlrtHostManifest,
+      options?: Omit<LlrtCallOptions, "functions">,
     ): Promise<LlrtResult<TOutput>>;
 
     dispose(): void;

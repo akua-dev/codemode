@@ -36,23 +36,85 @@ export interface ExecuteResult {
   stats: ExecuteStats;
 }
 
+export interface HostCallContext {
+  signal: AbortSignal;
+}
+
+export interface HostCapability {
+  call(this: HostCallContext, ...args: unknown[]): unknown | Promise<unknown>;
+}
+
+export interface CapabilityManifest {
+  namespaces: Record<string, Record<string, HostCapability>>;
+}
+
+export interface DataExecutor {
+  executeData(
+    code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult>;
+
+  /** Clean up resources. */
+  dispose?(): void;
+}
+
+export interface CapabilityExecutor extends DataExecutor {
+  executeWithCapabilities(
+    code: string,
+    input: Record<string, unknown>,
+    capabilities: CapabilityManifest,
+  ): Promise<ExecuteResult>;
+}
+
+export function isCapabilityExecutor(
+  executor: DataExecutor,
+): executor is DataExecutor & CapabilityExecutor {
+  return (
+    "executeWithCapabilities" in executor &&
+    typeof executor.executeWithCapabilities === "function"
+  );
+}
+
+export function emptyExecuteStats(options: {
+  memoryMB?: number;
+  wallTimeMs?: number;
+} = {}): ExecuteStats {
+  const wallTimeMs = options.wallTimeMs ?? 0;
+  const heapSizeLimitBytes = (options.memoryMB ?? 0) * 1024 * 1024;
+  return {
+    cpuTimeMs: wallTimeMs,
+    wallTimeMs,
+    heapUsedBytes: 0,
+    heapTotalBytes: 0,
+    externalBytes: 0,
+    heapSizeLimitBytes,
+    totalPhysicalBytes: 0,
+    availableBytes: heapSizeLimitBytes,
+    executableBytes: 0,
+    mallocedBytes: 0,
+    peakMallocedBytes: 0,
+  };
+}
+
 /**
  * Sandbox executor interface. Implement this to use a custom sandbox runtime.
  *
  * Built-in implementations:
  * - `LlrtNativeExecutor` (requires `@robinbraemer/llrt` peer dependency)
- * - `IsolatedVMExecutor` (requires `isolated-vm` peer dependency)
- * - `QuickJSExecutor` (requires `quickjs-emscripten` peer dependency)
+ * - `IsolatedVMExecutor` (requires `isolated-vm` peer dependency; data-only,
+ *   rejects host function globals)
+ * - `QuickJSExecutor` (requires `quickjs-emscripten` peer dependency; data-only,
+ *   rejects host function globals)
  */
-export interface Executor {
+export interface Executor extends DataExecutor {
   /**
-   * Execute JavaScript code in a sandboxed environment.
+   * Legacy execution entrypoint. Prefer `executeData()` for JSON-only code and
+   * `CapabilityExecutor.executeWithCapabilities()` for host-capable code.
    *
    * @param code - An async arrow function as a string, e.g. `async () => { ... }`
-   * @param globals - Named globals to inject into the sandbox. Each value is either:
-   *   - A plain object/array/primitive (injected as a frozen read-only value)
-   *   - A function (injected as a callable host function)
-   *   - An object with function values (injected as a namespace with callable methods)
+   * @param globals - Named JSON-compatible globals to inject into the sandbox.
+   *   Only LLRT's legacy path accepts function values; data-only executors reject
+   *   them.
    */
   execute(
     code: string,
@@ -73,6 +135,14 @@ export interface SandboxOptions {
   timeoutMs?: number;
   /** Wall-clock timeout in ms — caps total elapsed time including async I/O (default: 60000) */
   wallTimeMs?: number;
+  /** Maximum number of host calls per execution (default: 100). */
+  maxHostCalls?: number;
+  /** Maximum JSON-encoded host-call arguments in bytes (default: 1MB). */
+  maxHostPayloadBytes?: number;
+  /** Maximum JSON-encoded host-call result in bytes (default: 10MB). */
+  maxHostResultBytes?: number;
+  /** Maximum JSON-encoded final execution result in bytes (default: 10MB). */
+  maxResultBytes?: number;
 }
 
 /**
@@ -153,10 +223,22 @@ export interface CodeModeOptions {
   maxResponseTokens?: number;
 
   /**
+   * Maximum JavaScript source size in bytes before sandbox compilation.
+   * Default: 256KB.
+   */
+  maxCodeBytes?: number;
+
+  /**
    * Maximum number of requests per execution.
    * Default: 50.
    */
   maxRequests?: number;
+
+  /**
+   * Maximum number of in-flight requests per execution.
+   * Default: 8.
+   */
+  maxConcurrentRequests?: number;
 
   /**
    * Maximum response body size in bytes.

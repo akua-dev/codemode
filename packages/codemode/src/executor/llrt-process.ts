@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../types.js";
+import { rejectDataOnlyFunctions } from "./data-only.js";
 
 export interface LlrtProcessExecutorOptions extends SandboxOptions {
   binaryPath?: string;
@@ -25,18 +26,25 @@ export class LlrtProcessExecutor implements Executor {
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
-    const start = Date.now();
-
     if (Object.keys(globals).length > 0) {
       return {
         result: undefined,
         error: "LlrtProcessExecutor POC does not support globals or host callbacks yet",
-        stats: captureStats(start),
+        stats: captureStats(Date.now()),
       };
     }
 
+    return await this.executeProcess(code, {});
+  }
+
+  private async executeProcess(
+    code: string,
+    globals: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    const start = Date.now();
+
     try {
-      const stdout = await runLlrt(this.binaryPath, wrapCode(code), this.wallTimeMs);
+      const stdout = await runLlrt(this.binaryPath, wrapCode(code, globals), this.wallTimeMs);
       const encoded = lastJsonLine(stdout);
       const envelope = JSON.parse(encoded) as
         | { ok: true; value?: unknown }
@@ -62,12 +70,24 @@ export class LlrtProcessExecutor implements Executor {
       };
     }
   }
+
+  async executeData(
+    code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    const rejection = rejectDataOnlyFunctions(input, captureStats(Date.now()));
+    if (rejection) return rejection;
+
+    return await this.executeProcess(code, input);
+  }
 }
 
-function wrapCode(code: string): string {
+function wrapCode(code: string, globals: Record<string, unknown>): string {
+  const globalsJson = JSON.stringify(globals);
   return `
 (async () => {
   try {
+    Object.assign(globalThis, ${globalsJson});
     const value = await (${code})();
     console.log(JSON.stringify({ ok: true, value }));
   } catch (error) {

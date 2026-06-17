@@ -1,4 +1,22 @@
+import { DEFAULT_MAX_RESULT_BYTES } from "../limits.js";
 import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../types.js";
+import { findFunctionPath, rejectDataOnlyFunctions } from "./data-only.js";
+
+const UTF8_BYTE_LENGTH_SOURCE = `function(value) {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) continue;
+    if (codePoint <= 0x7f) bytes += 1;
+    else if (codePoint <= 0x7ff) bytes += 2;
+    else if (codePoint <= 0xffff) bytes += 3;
+    else {
+      bytes += 4;
+      index += 1;
+    }
+  }
+  return bytes;
+}`;
 
 /**
  * Executor implementation using quickjs-emscripten (pure WASM QuickJS).
@@ -8,17 +26,17 @@ import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../t
  * — most importantly **Bun** (its JavaScriptCore engine does not export V8
  * symbols like `v8::ValueSerializer::Delegate::IsHostObject` that isolated-vm
  * needs), and any future Cloudflare Workers / browser deployment. Production
- * callers on Node should use `IsolatedVMExecutor` for performance, maturity,
- * and the upstream-bug-free async story (see below). Backend selection is
- * automatic via `createExecutor` in `./auto.ts`.
+ * callers should use `LlrtNativeExecutor` or `IsolatedVMExecutor` for host
+ * callbacks, performance, maturity, and the upstream-bug-free async story
+ * (see below). Backend selection is automatic via `createExecutor` in
+ * `./auto.ts`.
  *
  * No native compilation is required: this runs on Node, Bun, Cloudflare
  * Workers, Deno, and the browser.
  *
  * Each execute() call creates a fresh QuickJS runtime + context — no state
- * leaks between calls. The sandbox has zero I/O capabilities by default (no
- * fetch, no fs, no require, no process). The only way out is through
- * injected host functions.
+ * leaks between calls. The sandbox has zero I/O capabilities (no fetch, no fs,
+ * no require, no process). Host callbacks fail closed at execution start.
  *
  * Stats parity: the `ExecuteStats` shape is shared with `IsolatedVMExecutor`.
  * QuickJS does not expose V8-specific counters (executable bytes, peak
@@ -38,9 +56,7 @@ import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../t
  * - **CPU timeout is wall-clock-based.** `IsolatedVMExecutor` enforces a true
  *   CPU-time limit via V8's script timeout. QuickJS does not expose CPU
  *   time separately from wall time, so `timeoutMs` here is measured from
- *   `execute()` entry with `Date.now()`. Async host calls that take wall
- *   time count against this budget — pick `timeoutMs` higher than you would
- *   for isolated-vm if guest code does any I/O via host functions.
+ *   `execute()` entry with `Date.now()`.
  *
  * Upstream bugs in `quickjs-emscripten@0.32.0` release-asyncify
  * -------------------------------------------------------------
@@ -51,21 +67,17 @@ import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../t
  *
  *   - **#258** — multiple sequential `await hostFn()` calls in user code crash
  *     with "Aborted(Assertion failed: p->ref_count == 0)" + WASM "memory
- *     access out of bounds" trap. Single `await` works. Use `Promise.all` for
- *     parallel calls instead of chained sequential `await`s.
+ *     access out of bounds" trap.
  *   - **#261** — `QuickJSAsyncWASMModule.newRuntime` disposes in the wrong
- *     order, producing `Aborted(Assertion failed: ...)` noise on dispose
- *     after asyncified host functions have been defined. Caught in our
- *     `finally`; result correctness unaffected.
+ *     order, producing `Aborted(Assertion failed: ...)` noise on dispose.
  *
  * This implementation also works around two related construction-ordering
  * bugs in the same release-asyncify build:
  *
  *   1. Calling `evalCode` / `evalCodeAsync` *before* `newAsyncifiedFunction`
  *      registration corrupts asyncify bookkeeping and crashes the second
- *      sequential `await` in user code. Mitigation: register host functions
- *      first and build all setup (no-op console, plain-data globals) via the
- *      handle API only — see `injectNoopConsole`, `injectValue`.
+ *      sequential `await` in user code. Host callbacks are therefore disabled
+ *      for untrusted execution.
  *   2. The IIFE result handle is not reliably GC-anchored once the user's
  *      `(async () => ...)()` resolves: `context.dump(handle)` then crashes
  *      with "memory access out of bounds" even though the JS-side wrapper
@@ -73,32 +85,43 @@ import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../t
  *      `JSON.stringify` envelope so the value we read back is a primitive
  *      string. See `execute()` for the wrapping detail.
  *
- * **Guest-code constraint for callers**: sandboxed user code must not chain
- * sequential `await`s on host functions. Use `Promise.all([fn1(), fn2()])`
- * or call once-per-execution. This applies on every runtime, not just Bun.
+ * **Guest-code constraint for callers**: use QuickJS for explicit data-only
+ * execution. For request-capable execution, use LLRT.
  */
 export class QuickJSExecutor implements Executor {
   private memoryMB: number;
   private timeoutMs: number;
   private wallTimeMs: number;
+  private maxResultBytes: number;
 
   constructor(options: SandboxOptions = {}) {
     this.memoryMB = options.memoryMB ?? 64;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.wallTimeMs = options.wallTimeMs ?? 60_000;
+    this.maxResultBytes = options.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
   }
 
   async execute(
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
+    const start = Date.now();
+    if (hasHostFunctions(globals)) {
+      return {
+        result: undefined,
+        error:
+          "QuickJSExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution",
+        stats: emptyStats(start, this.memoryMB),
+      };
+    }
+
     // Lazy import: optional peer dependency.
     const qjs = await import("quickjs-emscripten");
     const context = await qjs.newAsyncContext();
     const runtime = context.runtime;
     runtime.setMemoryLimit(this.memoryMB * 1024 * 1024);
 
-    const start = Date.now();
+    const abortController = new AbortController();
     let cpuDeadlineHit = false;
     let wallTimer: ReturnType<typeof setTimeout> | undefined;
     let wallTimedOut = false;
@@ -116,42 +139,18 @@ export class QuickJSExecutor implements Executor {
       return false;
     });
 
-    // Track disposable handles created during global injection so we can
-    // dispose them in `finally` even if injection throws partway through.
-    const injectedHandles: Array<{ dispose(): void; alive: boolean }> = [];
-
     try {
-      // CRITICAL: setup ordering matters with release-asyncify QuickJS.
-      //
-      // 1. Asyncified host functions (`newAsyncifiedFunction`) MUST be
-      //    registered before any `evalCode`/`evalCodeAsync` — otherwise the
-      //    second sequential `await hostFn()` in user code crashes with
-      //    "memory access out of bounds" / GC mark assertions.
-      // 2. The no-op console is therefore also built via the handle API
-      //    (`newObject` + `newFunction`), never via `evalCode`.
-      // 3. Plain-data and namespace-data injection use only handle-API calls
-      //    (`newNumber` / `newString` / `newObject` / `newArray`), see
-      //    `injectValue`.
-      //
-      // Inject host functions first so they are registered before the user's
-      // `evalCodeAsync` is invoked. Order among them is not significant.
+      // Plain-data injection uses only handle-API calls (`newNumber` /
+      // `newString` / `newObject` / `newArray`), never `evalCode`, to avoid
+      // quickjs-emscripten release-asyncify construction-ordering bugs.
       for (const [name, value] of Object.entries(globals)) {
-        if (typeof value === "function") {
-          injectAsyncFunction(context, name, value as (...args: unknown[]) => unknown, injectedHandles);
-        } else if (isNamespaceWithMethods(value)) {
-          injectNamespace(context, name, value as Record<string, unknown>, injectedHandles);
-        } else {
-          const valueHandle = injectValue(context, value);
-          context.setProp(context.global, name, valueHandle);
-          disposeIfOwned(context, valueHandle);
-        }
+        const valueHandle = injectValue(context, value);
+        context.setProp(context.global, name, valueHandle);
+        disposeIfOwned(context, valueHandle);
       }
 
-      // Install no-op console AFTER asyncified functions (and via handle API
-      // only) so we don't trigger the eval-before-asyncified-registration
-      // failure mode. Injecting a real console would also be an OOM vector
-      // since logs accumulate in the host process outside the sandbox
-      // memory limit.
+      // Injecting a real console would be an OOM vector since logs accumulate
+      // in the host process outside the sandbox memory limit.
       injectNoopConsole(context);
 
       // Wall-clock timeout: hard-stop the entire execution including async
@@ -160,6 +159,7 @@ export class QuickJSExecutor implements Executor {
       const wallPromise = new Promise<never>((_, reject) => {
         wallTimer = setTimeout(() => {
           wallTimedOut = true;
+          abortController.abort();
           // Force the QuickJS interrupt handler to abort on the next tick by
           // marking the deadline as exceeded. evalCodeAsync will surface
           // "interrupted" on the next bytecode boundary.
@@ -186,7 +186,7 @@ export class QuickJSExecutor implements Executor {
       //
       // Errors thrown by the user code still come back through the normal
       // `resolution.error` channel; only successful results need wrapping.
-      const wrappedCode = `(async () => { const __r = await (${code})(); return __r === undefined ? "__cmUndef" : JSON.stringify(__r); })()`;
+      const wrappedCode = `(async () => { const __codemodeJsonStringify = JSON.stringify.bind(JSON); const __codemodeUtf8ByteLength = ${UTF8_BYTE_LENGTH_SOURCE}; const __r = await (${code})(); if (__r === undefined) return "__cmUndef"; const __j = __codemodeJsonStringify(__r); if (__j === undefined) return "__cmUndef"; if (__codemodeUtf8ByteLength(__j) > ${this.maxResultBytes}) throw new Error("Execution result exceeds limit of ${this.maxResultBytes} bytes"); return __j; })()`;
       const evalP = context.evalCodeAsync(wrappedCode);
 
       const evalResult = await Promise.race([evalP, wallPromise]);
@@ -210,6 +210,7 @@ export class QuickJSExecutor implements Executor {
       const encoded = context.dump(resolution.value);
       resolution.value.dispose();
       promiseHandle.dispose();
+      validateExecutionResult(encoded, this.maxResultBytes);
 
       let value: unknown;
       if (encoded === "__cmUndef" || encoded === undefined) {
@@ -242,15 +243,7 @@ export class QuickJSExecutor implements Executor {
       };
     } finally {
       clearTimeout(wallTimer);
-      for (const handle of injectedHandles) {
-        if (handle.alive) {
-          try {
-            handle.dispose();
-          } catch {
-            // already disposed
-          }
-        }
-      }
+      abortController.abort();
       try {
         // `context.dispose()` already owns the runtime lifetime
         // (quickjs-emscripten-core attaches the runtime to the context's
@@ -260,10 +253,19 @@ export class QuickJSExecutor implements Executor {
         context.dispose();
       } catch {
         // ignore — best-effort cleanup; release-asyncify can throw
-        // assertion noise on dispose after asyncified host fns are defined
-        // (upstream quickjs-emscripten#261).
+        // assertion noise on dispose (upstream quickjs-emscripten#261).
       }
     }
+  }
+
+  async executeData(
+    code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    const rejection = rejectDataOnlyFunctions(input, emptyStats(Date.now(), this.memoryMB));
+    if (rejection) return rejection;
+
+    return await this.execute(code, input);
   }
 }
 
@@ -277,8 +279,8 @@ export class QuickJSExecutor implements Executor {
  * event loop can also process the host-side promises that the asyncified
  * functions are awaiting.
  *
- * Races against `wallPromise` so a hung host call still produces a wall-clock
- * timeout error rather than blocking the executor forever.
+ * Races against `wallPromise` so a never-settling guest promise still produces
+ * a wall-clock timeout error rather than blocking the executor forever.
  */
 async function raceWithJobPump(
   context: import("quickjs-emscripten").QuickJSAsyncContext,
@@ -288,14 +290,13 @@ async function raceWithJobPump(
   // Start resolving the user-code promise on the QuickJS side. The returned
   // host-side Promise settles once the user's `(async () => ...)()` resolves
   // — but only if we keep draining the runtime's pending-job queue while we
-  // wait, because asyncified host callbacks enqueue their continuations
-  // there.
+  // wait.
   const resolveP = context.resolvePromise(promiseHandle);
   let settled = false;
   void resolveP.then(() => { settled = true; }, () => { settled = true; });
 
   // Pump loop: drain pending jobs, yield one macrotask, repeat. We race
-  // against `wallPromise` so a hung host call surfaces as a wall-clock
+    // against `wallPromise` so a hung guest promise surfaces as a wall-clock
   // timeout instead of an infinite loop.
   //
   // Implementation notes:
@@ -335,105 +336,22 @@ async function raceWithJobPump(
   return resolveP;
 }
 
-interface InjectedHandle {
-  dispose(): void;
-  alive: boolean;
-}
-
-/**
- * Inject an async (or sync) host function as a global by name.
- *
- * We use `newAsyncifiedFunction` so the sandboxed code can `await` the call
- * exactly like in isolated-vm. Arguments and return values cross the boundary
- * via JSON-clone, matching isolated-vm's `{ copy: true }` semantics.
- *
- * NOTE on ordering: this MUST be called *before* any `evalCode` /
- * `evalCodeAsync` against the context — otherwise the release-asyncify build
- * corrupts its asyncify bookkeeping and sequential `await`s in user code
- * crash with "memory access out of bounds" / GC assertion failures. See
- * `injectNoopConsole` for the alternate handle-API approach used for setup.
- */
-function injectAsyncFunction(
-  context: import("quickjs-emscripten").QuickJSAsyncContext,
-  name: string,
-  fn: (...args: unknown[]) => unknown,
-  tracked: InjectedHandle[],
-): void {
-  const handle = context.newAsyncifiedFunction(name, async (...argHandles) => {
-    const args = argHandles.map((h) => context.dump(h));
-    let result: unknown;
-    try {
-      result = await fn(...args);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { error: context.newString(message) };
-    }
-    return injectValue(context, result);
-  });
-  context.setProp(context.global, name, handle);
-  handle.dispose();
-  const tracker: InjectedHandle = {
-    alive: false,
-    dispose: () => {},
-  };
-  tracked.push(tracker);
-}
-
-/**
- * Inject a namespace object containing host functions and/or data.
- *
- * Function values become asyncified callables; non-function values are
- * JSON-cloned. Matches `IsolatedVMExecutor`'s namespace injection semantics.
- */
-function injectNamespace(
-  context: import("quickjs-emscripten").QuickJSAsyncContext,
-  name: string,
-  ns: Record<string, unknown>,
-  tracked: InjectedHandle[],
-): void {
-  const nsHandle = context.newObject();
-  for (const [key, val] of Object.entries(ns)) {
-    if (typeof val === "function") {
-      const fnHandle = context.newAsyncifiedFunction(`${name}.${key}`, async (...argHandles) => {
-        const args = argHandles.map((h) => context.dump(h));
-        let result: unknown;
-        try {
-          result = await (val as (...a: unknown[]) => unknown)(...args);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          return { error: context.newString(message) };
-        }
-        return injectValue(context, result);
-      });
-      context.setProp(nsHandle, key, fnHandle);
-      fnHandle.dispose();
-    } else if (val !== undefined) {
-      const valueHandle = injectValue(context, val);
-      context.setProp(nsHandle, key, valueHandle);
-      disposeIfOwned(context, valueHandle);
-    }
+function validateExecutionResult(result: unknown, maxResultBytes: number): void {
+  if (result === "__cmUndef" || result === undefined) return;
+  if (typeof result !== "string") {
+    throw new Error("Execution result serialization returned a non-string value");
   }
-  context.setProp(context.global, name, nsHandle);
-  const tracker: InjectedHandle = {
-    alive: true,
-    dispose: () => {
-      tracker.alive = false;
-      nsHandle.dispose();
-    },
-  };
-  tracked.push(tracker);
-  tracker.dispose();
+  if (Buffer.byteLength(result, "utf8") > maxResultBytes) {
+    throw new Error(`Execution result exceeds limit of ${maxResultBytes} bytes`);
+  }
 }
 
 /**
  * Marshal a JS host value into a fresh QuickJS handle.
  *
  * We build handles directly via `newNumber` / `newString` / `newObject` /
- * `newArray` rather than going through `evalCode`. Calling `evalCode` from
- * inside an asyncified host callback can corrupt the QuickJS reference count
- * (observed: "Assertion failed: p->ref_count == 0 / > 0" on sequential
- * awaits) because the C-side eval allocates handles on a stack frame that
- * asyncify is already unwinding.
+ * `newArray` rather than going through `evalCode`, keeping setup independent
+ * from the release-asyncify eval ordering bugs.
  *
  * Semantics match isolated-vm's `{ copy: true }`: only JSON-cloneable shapes
  * (primitives, plain objects, arrays) cross the boundary. Functions, Symbols,
@@ -569,15 +487,25 @@ function captureStats(
   };
 }
 
-function isNamespaceWithMethods(value: unknown): boolean {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.values(value as Record<string, unknown>).some(
-      (v) => typeof v === "function",
-    )
-  );
+function emptyStats(startMs: number, memoryMB: number): ExecuteStats {
+  const wallTimeMs = Date.now() - startMs;
+  return {
+    cpuTimeMs: wallTimeMs,
+    wallTimeMs,
+    heapUsedBytes: 0,
+    heapTotalBytes: 0,
+    externalBytes: 0,
+    heapSizeLimitBytes: memoryMB * 1024 * 1024,
+    totalPhysicalBytes: 0,
+    availableBytes: memoryMB * 1024 * 1024,
+    executableBytes: 0,
+    mallocedBytes: 0,
+    peakMallocedBytes: 0,
+  };
+}
+
+function hasHostFunctions(globals: Record<string, unknown>): boolean {
+  return findFunctionPath(globals) !== null;
 }
 
 /**

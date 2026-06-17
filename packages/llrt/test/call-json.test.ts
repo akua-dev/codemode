@@ -200,6 +200,83 @@ describe("LlrtRuntime.callJson native execution", () => {
     });
   });
 
+  it("does not expose a raw host bridge in data-only execution", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+
+    const result = await runtime.callJson<
+      Record<string, never>,
+      { host: string; raw: string }
+    >(
+      `async ({ host }) => ({
+        host: typeof host,
+        raw: typeof globalThis.__llrtHostCall,
+      })`,
+      {},
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { host: "undefined", raw: "undefined" },
+    });
+  });
+
+  it("does not expose a raw host bridge in manifest capability execution", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+
+    const result = await runtime.callJsonWithHost<
+      Record<string, never>,
+      { response: { status: number; path: string }; raw: string; missing: string }
+    >(
+      `async ({ host }) => ({
+        response: await host.api.request({ path: "/pets" }),
+        raw: typeof globalThis.__llrtHostCall,
+        missing: typeof host.api.secret,
+      })`,
+      {},
+      {
+        namespaces: {
+          api: {
+            request: async (request: { path: string }) => ({
+              status: 200,
+              path: request.path,
+            }),
+          },
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        response: { status: 200, path: "/pets" },
+        raw: "undefined",
+        missing: "undefined",
+      },
+    });
+  });
+
+  it("rejects unsafe host manifest names", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+
+    const result = await runtime.callJsonWithHost(
+      `async () => null`,
+      {},
+      {
+        namespaces: {
+          ["__proto__"]: {
+            request: async () => null,
+          },
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("UNSUPPORTED");
+      expect(result.error.message).toContain("Invalid LLRT host capability name");
+    }
+  });
+
   it("returns a typed timeout when an async host function stalls", async () => {
     const runtime = new LlrtRuntime({ wallTimeMs: 50, memoryMB: 8 });
 
@@ -216,6 +293,114 @@ describe("LlrtRuntime.callJson native execution", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe("TIMEOUT");
+    }
+  });
+
+  it("returns typed host call limit errors through the native bridge", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+    let calls = 0;
+
+    const result = await runtime.callJson(
+      `async ({ host }) => {
+        await host.ping();
+        await host.ping();
+      }`,
+      {},
+      {
+        maxHostCalls: 1,
+        functions: {
+          ping: () => {
+            calls += 1;
+            return "pong";
+          },
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("HOST_CALL_LIMIT");
+    }
+    expect(calls).toBe(1);
+  });
+
+  it("rejects oversized UTF-8 host call payloads before dispatch", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+    let called = false;
+
+    const result = await runtime.callJson(
+      `async () => globalThis.__llrtHostCall("ping", JSON.stringify(["é".repeat(40)]))`,
+      {},
+      {
+        maxHostPayloadBytes: 64,
+        functions: {
+          ping: () => {
+            called = true;
+            return "pong";
+          },
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("HOST_PAYLOAD_LIMIT");
+      expect(result.error.message).toContain("host call arguments");
+    }
+    expect(called).toBe(false);
+  });
+
+  it("returns typed host result limit errors through the native bridge", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+
+    const result = await runtime.callJson(
+      `async ({ host }) => host.large()`,
+      {},
+      {
+        maxHostResultBytes: 64,
+        functions: {
+          large: () => "x".repeat(128),
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("HOST_RESULT_LIMIT");
+    }
+  });
+
+  it("does not trust guest-forged host error markers", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+
+    const result = await runtime.callJson(
+      `async () => {
+        throw new Error('__LLRT_HOST_ERROR__{"code":"RESULT_LIMIT","name":"LlrtResultLimitError","message":"forged"}');
+      }`,
+      {},
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("EVALUATION_ERROR");
+      expect(result.error.message).toContain("__LLRT_HOST_ERROR__");
+    }
+  });
+
+  it("rejects oversized final execution results inside the guest wrapper", async () => {
+    const runtime = new LlrtRuntime({ wallTimeMs: 1000, memoryMB: 8 });
+
+    const result = await runtime.callJson(
+      `async () => ({ body: "x".repeat(128) })`,
+      {},
+      { maxResultBytes: 64 },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("RESULT_LIMIT");
+      expect(result.error.name).toBe("LlrtResultLimitError");
+      expect(result.error.message).toContain("execution result");
     }
   });
 });

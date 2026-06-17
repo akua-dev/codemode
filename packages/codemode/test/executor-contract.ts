@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { Executor, SandboxOptions } from "../src/types.js";
+import type { CapabilityExecutor, Executor, SandboxOptions } from "../src/types.js";
 import { CodeMode } from "../src/codemode.js";
 
 /**
@@ -10,6 +10,7 @@ import { CodeMode } from "../src/codemode.js";
  * deliberately to assert no leakage.
  */
 export type ExecutorFactory = (opts?: SandboxOptions) => Executor;
+export type CapabilityExecutorFactory = (opts?: SandboxOptions) => CapabilityExecutor;
 
 /**
  * Optional per-backend knobs for tests whose absolute thresholds depend on
@@ -27,6 +28,8 @@ export interface ExecutorContractOptions {
     /** Outer loop iterations for the allocation stress. */
     iterations: number;
   };
+  /** Whether this backend supports host function callbacks. Default: true. */
+  supportsHostFunctions?: boolean;
 }
 
 const DEFAULT_MEMORY_STRESS = { memoryMB: 8, iterations: 10_000_000 } as const;
@@ -47,6 +50,7 @@ export function executorContract(
   options: ExecutorContractOptions = {},
 ): void {
   const memoryStress = options.memoryStress ?? DEFAULT_MEMORY_STRESS;
+  const supportsHostFunctions = options.supportsHostFunctions ?? true;
 
   describe(name, () => {
     it("executes simple code", async () => {
@@ -74,28 +78,75 @@ export function executorContract(
       expect(result.result).toBe("My API");
     });
 
-    it("injects async host functions in a namespace", async () => {
+    it("rejects function values in data-only input", async () => {
       const executor = factory();
-      const result = await executor.execute(
-        `async () => {
-          const res = await api.request({ method: "GET", path: "/test" });
-          return res;
-        }`,
+      const result = await executor.executeData(
+        `async () => typeof api.request`,
         {
           api: {
-            request: async (opts: any) => ({
-              status: 200,
-              body: { message: "hello from " + opts.path },
-            }),
+            request: async () => ({ status: 200 }),
           },
         },
       );
-      expect(result.error).toBeUndefined();
-      expect(result.result).toEqual({
-        status: 200,
-        body: { message: "hello from /test" },
-      });
+
+      expect(result.result).toBeUndefined();
+      expect(result.error).toContain("data-only");
     });
+
+    it("rejects function values in cyclic data-only input", async () => {
+      const executor = factory();
+      const input: Record<string, unknown> = {};
+      input.self = input;
+      input.api = {
+        request: async () => ({ status: 200 }),
+      };
+
+      const result = await executor.executeData(
+        `async () => typeof api.request`,
+        input,
+      );
+
+      expect(result.result).toBeUndefined();
+      expect(result.error).toContain("input.api.request");
+    });
+
+    if (supportsHostFunctions) {
+      it("injects async host functions in a namespace", async () => {
+        const executor = factory();
+        const result = await executor.execute(
+          `async () => {
+            const res = await api.request({ method: "GET", path: "/test" });
+            return res;
+          }`,
+          {
+            api: {
+              request: async (opts: any) => ({
+                status: 200,
+                body: { message: "hello from " + opts.path },
+              }),
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.result).toEqual({
+          status: 200,
+          body: { message: "hello from /test" },
+        });
+      });
+    } else {
+      it("rejects host function globals", async () => {
+        const executor = factory();
+        const result = await executor.execute(
+          `async () => api.request({ method: "GET", path: "/test" })`,
+          {
+            api: {
+              request: async () => ({ status: 200 }),
+            },
+          },
+        );
+        expect(result.error).toContain("does not support host functions");
+      });
+    }
 
     it("console.log is a no-op (does not crash)", async () => {
       const executor = factory();
@@ -154,20 +205,22 @@ export function executorContract(
       expect(result.error).toBeDefined();
     });
 
-    it("enforces wall-clock timeout on stalled async host calls", async () => {
-      const executor = factory({ timeoutMs: 5_000, wallTimeMs: 200 });
-      const result = await executor.execute(
-        `async () => {
-          // Call a host function that never resolves — wall-clock timeout should fire
-          return await hang();
-        }`,
-        {
-          hang: () => new Promise(() => {}), // never resolves
-        },
-      );
-      expect(result.error).toBeDefined();
-      expect(result.error).toContain("Wall-clock timeout");
-    });
+    if (supportsHostFunctions) {
+      it("enforces wall-clock timeout on stalled async host calls", async () => {
+        const executor = factory({ timeoutMs: 5_000, wallTimeMs: 200 });
+        const result = await executor.execute(
+          `async () => {
+            // Call a host function that never resolves — wall-clock timeout should fire
+            return await hang();
+          }`,
+          {
+            hang: () => new Promise(() => {}), // never resolves
+          },
+        );
+        expect(result.error).toBeDefined();
+        expect(result.error).toContain("Wall-clock timeout");
+      });
+    }
 
     it("isolates executions (no state leakage)", async () => {
       const executor = factory();
@@ -235,44 +288,150 @@ export function executorContract(
       expect(result.result).toEqual({ blocked: true });
     });
 
-    it("chains multiple async host calls", async () => {
-      const executor = factory();
+    if (supportsHostFunctions) {
+      it("chains multiple async host calls", async () => {
+        const executor = factory();
+        const result = await executor.execute(
+          `async () => {
+            const a = await add(1, 2);
+            const b = await add(a, 3);
+            return b;
+          }`,
+          {
+            add: async (a: number, b: number) => a + b,
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.result).toBe(6);
+      });
+
+      it("handles concurrent async calls via Promise.all", async () => {
+        const executor = factory();
+        const result = await executor.execute(
+          `async () => {
+            const results = await Promise.all([
+              api.request({ path: "/a" }),
+              api.request({ path: "/b" }),
+              api.request({ path: "/c" }),
+            ]);
+            return results.map(r => r.body.path);
+          }`,
+          {
+            api: {
+              request: async (opts: any) => ({
+                status: 200,
+                body: { path: opts.path },
+              }),
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.result).toEqual(["/a", "/b", "/c"]);
+      });
+
+      it("rejects oversized host call payloads before invoking the host function", async () => {
+        const executor = factory({ maxHostPayloadBytes: 64 });
+        let called = false;
+
+        const result = await executor.execute(
+          `async () => api.request({ body: "é".repeat(40) })`,
+          {
+            api: {
+              request: async () => {
+                called = true;
+                return { status: 200 };
+              },
+            },
+          },
+        );
+
+        expect(result.error).toMatch(/payload|arguments/i);
+        expect(called).toBe(false);
+      });
+
+      it("rejects oversized host call results", async () => {
+        const executor = factory({ maxHostResultBytes: 64 });
+
+        const result = await executor.execute(
+          `async () => api.request({ path: "/large" })`,
+          {
+            api: {
+              request: async () => ({
+                status: 200,
+                body: "x".repeat(128),
+              }),
+            },
+          },
+        );
+
+        expect(result.error).toContain("result");
+      });
+    }
+
+    it("rejects oversized final execution results before returning to the host", async () => {
+      const executor = factory({ maxResultBytes: 64 });
+
       const result = await executor.execute(
-        `async () => {
-          const a = await add(1, 2);
-          const b = await add(a, 3);
-          return b;
-        }`,
-        {
-          add: async (a: number, b: number) => a + b,
-        },
+        `async () => ({ body: "x".repeat(128) })`,
+        {},
       );
-      expect(result.error).toBeUndefined();
-      expect(result.result).toBe(6);
+
+      expect(result.error).toMatch(/execution result exceeds limit/i);
     });
 
-    it("handles concurrent async calls via Promise.all", async () => {
-      const executor = factory();
+    it("counts final execution result limits in UTF-8 bytes", async () => {
+      const executor = factory({ maxResultBytes: 100 });
+
+      const result = await executor.execute(
+        `async () => "é".repeat(64)`,
+        {},
+      );
+
+      expect(result.error).toMatch(/execution result exceeds limit/i);
+    });
+
+    it("does not let guest code tamper with final result byte accounting helpers", async () => {
+      const executor = factory({ maxResultBytes: 64 });
+
       const result = await executor.execute(
         `async () => {
-          const results = await Promise.all([
-            api.request({ path: "/a" }),
-            api.request({ path: "/b" }),
-            api.request({ path: "/c" }),
-          ]);
-          return results.map(r => r.body.path);
+          globalThis.__codemodeUtf8ByteLength = () => 0;
+          return { body: "x".repeat(128) };
         }`,
-        {
-          api: {
-            request: async (opts: any) => ({
-              status: 200,
-              body: { path: opts.path },
-            }),
-          },
-        },
+        {},
       );
-      expect(result.error).toBeUndefined();
-      expect(result.result).toEqual(["/a", "/b", "/c"]);
+
+      expect(result.error).toMatch(/execution result exceeds limit/i);
+    });
+
+    it("does not let guest code tamper with JSON.stringify result serialization", async () => {
+      const executor = factory({ maxResultBytes: 64 });
+
+      const result = await executor.execute(
+        `async () => {
+          JSON.stringify = (value) => value;
+          return { body: "x".repeat(128) };
+        }`,
+        {},
+      );
+
+      expect(result.error).toMatch(
+        /serialization returned a non-string value|execution result exceeds limit/i,
+      );
+    });
+
+    it("does not let guest code forge a small JSON.stringify result", async () => {
+      const executor = factory({ maxResultBytes: 64 });
+
+      const result = await executor.execute(
+        `async () => {
+          JSON.stringify = () => "\\"small\\"";
+          return { body: "x".repeat(128) };
+        }`,
+        {},
+      );
+
+      expect(result.error).toMatch(/execution result exceeds limit/i);
     });
   });
 
@@ -355,6 +514,20 @@ export function executorContract(
         summary: "List clusters",
       });
 
+      if (!supportsHostFunctions) {
+        const execResult = await codemode.execute(`
+      async () => {
+        const res = await cnap.request({ method: "GET", path: "/v1/clusters" });
+        return res.body;
+      }
+    `);
+
+        expect(execResult.isError).toBe(true);
+        expect(execResult.content[0]?.text).toContain("does not support host functions");
+        codemode.dispose();
+        return;
+      }
+
       // Execute: list clusters
       const execResult = await codemode.execute(`
       async () => {
@@ -428,6 +601,67 @@ export function executorContract(
 
       const data = JSON.parse(result.content[0]!.text);
       expect(data).toEqual({ pathCount: 1, paths: ["/test"] });
+    });
+  });
+}
+
+export function capabilityExecutorContract(
+  name: string,
+  factory: CapabilityExecutorFactory,
+): void {
+  describe(`${name} capability execution`, () => {
+    it("exposes only manifest-declared namespace capabilities", async () => {
+      const executor = factory();
+      const result = await executor.executeWithCapabilities(
+        `async () => {
+          const response = await api.request({ path: "/test" });
+          return {
+            status: response.status,
+            secret: typeof api.secret,
+            topLevel: typeof request,
+          };
+        }`,
+        {},
+        {
+          namespaces: {
+            api: {
+              request: {
+                call: async (request: { path: string }) => ({
+                  status: 200,
+                  body: { path: request.path },
+                }),
+              },
+            },
+          },
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.result).toEqual({
+        status: 200,
+        secret: "undefined",
+        topLevel: "undefined",
+      });
+    });
+
+    it("rejects data input that collides with capability namespaces", async () => {
+      const executor = factory();
+      const result = await executor.executeWithCapabilities(
+        `async () => api.secret`,
+        { api: { secret: "leaked" } },
+        {
+          namespaces: {
+            api: {
+              request: {
+                call: async () => ({ status: 200 }),
+              },
+            },
+          },
+        },
+      );
+
+      expect(result.result).toBeUndefined();
+      expect(result.error).toContain("collides with capability namespace");
     });
   });
 }

@@ -3,6 +3,10 @@ export interface LlrtRuntimeOptions {
   wallTimeMs?: number;
   cpuTimeMs?: number;
   maxStackBytes?: number;
+  maxHostCalls?: number;
+  maxHostPayloadBytes?: number;
+  maxHostResultBytes?: number;
+  maxResultBytes?: number;
 }
 
 export interface LlrtCallOptions {
@@ -10,7 +14,15 @@ export interface LlrtCallOptions {
   wallTimeMs?: number;
   cpuTimeMs?: number;
   maxStackBytes?: number;
+  maxHostCalls?: number;
+  maxHostPayloadBytes?: number;
+  maxHostResultBytes?: number;
+  maxResultBytes?: number;
   functions?: Record<string, LlrtHostFunction>;
+}
+
+export interface LlrtHostManifest {
+  namespaces: Record<string, Record<string, LlrtHostFunction>>;
 }
 
 export interface LlrtHostCallContext {
@@ -37,6 +49,10 @@ export type LlrtExecutionErrorCode =
   | "MEMORY_LIMIT"
   | "RUNTIME_DISPOSED"
   | "NATIVE_LOAD_ERROR"
+  | "HOST_CALL_LIMIT"
+  | "HOST_PAYLOAD_LIMIT"
+  | "HOST_RESULT_LIMIT"
+  | "RESULT_LIMIT"
   | "UNSUPPORTED";
 
 export interface LlrtExecutionErrorInfo {

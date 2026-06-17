@@ -1,17 +1,23 @@
 import { expect, it } from "vitest";
 import { LlrtNativeExecutor } from "../src/executor/llrt-native.js";
-import { executorContract } from "./executor-contract.js";
+import { capabilityExecutorContract, executorContract } from "./executor-contract.js";
 import {
   describeWithLlrtNativeBinding as describe,
   llrtNativeBindingAvailable,
 } from "./llrt-native-test-helper.js";
 import type { LlrtHostCallContext } from "@robinbraemer/llrt";
 
+const LLRT_HOST_BRIDGE_GLOBAL = "__llrtHostCall";
+
 if (llrtNativeBindingAvailable) {
   executorContract(
     "LlrtNativeExecutor",
     (opts) => new LlrtNativeExecutor(opts),
     { memoryStress: { memoryMB: 1, iterations: 100_000 } },
+  );
+  capabilityExecutorContract(
+    "LlrtNativeExecutor",
+    (opts) => new LlrtNativeExecutor(opts),
   );
 } else {
   describe.skip("LlrtNativeExecutor", () => {
@@ -31,6 +37,45 @@ describe("LlrtNativeExecutor", () => {
     expect(result.error).toBeUndefined();
     expect(result.result).toBe("PETSTORE");
     expect(result.stats.heapSizeLimitBytes).toBe(8 * 1024 * 1024);
+  });
+
+  it("does not expose the host bridge for data-only globals", async () => {
+    const executor = new LlrtNativeExecutor({ memoryMB: 8, wallTimeMs: 1000 });
+
+    const result = await executor.execute(
+      `async () => typeof globalThis.${LLRT_HOST_BRIDGE_GLOBAL}`,
+      { spec: { info: { title: "Petstore" } } },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toBe("undefined");
+  });
+
+  it("does not expose the LLRT raw bridge during capability execution", async () => {
+    const executor = new LlrtNativeExecutor({ memoryMB: 8, wallTimeMs: 1000 });
+
+    const result = await executor.executeWithCapabilities(
+      `async () => ({
+        response: await api.request({ path: "/pets" }),
+        raw: typeof globalThis.${LLRT_HOST_BRIDGE_GLOBAL},
+      })`,
+      {},
+      {
+        namespaces: {
+          api: {
+            request: {
+              call: async () => ({ status: 200 }),
+            },
+          },
+        },
+      },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({
+      response: { status: 200 },
+      raw: "undefined",
+    });
   });
 
   it("returns runtime errors as ExecuteResult errors", async () => {
@@ -65,6 +110,28 @@ describe("LlrtNativeExecutor", () => {
 
     expect(result.error).toBeUndefined();
     expect(result.result).toEqual({ title: "Petstore", path: "/v1/pets" });
+  });
+
+  it("does not expose the LLRT raw bridge during legacy host function execution", async () => {
+    const executor = new LlrtNativeExecutor({ memoryMB: 8, wallTimeMs: 1000 });
+
+    const result = await executor.execute(
+      `async () => ({
+        response: await api.request({ path: "/v1/pets" }),
+        raw: typeof globalThis.${LLRT_HOST_BRIDGE_GLOBAL},
+      })`,
+      {
+        api: {
+          request: async () => ({ status: 200 }),
+        },
+      },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({
+      response: { status: 200 },
+      raw: "undefined",
+    });
   });
 
   it("does not expose host call context as a guest argument", async () => {
