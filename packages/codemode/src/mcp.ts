@@ -18,6 +18,7 @@
  */
 
 import type { CodeMode } from "./codemode.js";
+import { DEFAULT_MAX_CODE_BYTES } from "./limits.js";
 import { z } from "zod";
 
 /**
@@ -37,7 +38,9 @@ export function registerTools(
       def.name,
       {
         description: def.description,
-        inputSchema: { code: z.string().describe("JavaScript code to execute") },
+        inputSchema: {
+          code: z.string().max(DEFAULT_MAX_CODE_BYTES).describe("JavaScript code to execute"),
+        },
       },
       async (args: { code: string }) => {
         return codemode.callTool(def.name, { code: args.code });

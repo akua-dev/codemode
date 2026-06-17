@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LlrtNativeExecutor } from "../src/executor/llrt-native.js";
-import { isMissingOptionalDependency } from "../src/executor/auto.js";
+import {
+  autoExecutorBackendOrder,
+  isMissingOptionalDependency,
+} from "../src/executor/auto.js";
 
 afterEach(() => {
   vi.doUnmock("@robinbraemer/llrt");
+  vi.doUnmock("isolated-vm");
+  vi.doUnmock("quickjs-emscripten");
   vi.resetModules();
 });
 
@@ -33,5 +38,19 @@ describe("createExecutor", () => {
     expect(
       isMissingOptionalDependency(new Error("broken llrt package"), "@robinbraemer/llrt"),
     ).toBe(false);
+  });
+
+  it("does not classify installed-but-broken fallback runtimes as safely missing", () => {
+    const brokenNativeBinding = Object.assign(
+      new Error("isolated-vm native binding is broken"),
+      { code: "ERR_DLOPEN_FAILED" },
+    );
+
+    expect(isMissingOptionalDependency(brokenNativeBinding, "isolated-vm")).toBe(false);
+  });
+
+  it("does not include QuickJS in the automatic backend order", () => {
+    expect(autoExecutorBackendOrder()).toContain("llrt");
+    expect(autoExecutorBackendOrder()).not.toContain("quickjs");
   });
 });

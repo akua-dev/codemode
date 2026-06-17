@@ -1,4 +1,24 @@
+import {
+  DEFAULT_MAX_RESULT_BYTES,
+} from "../limits.js";
 import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../types.js";
+import { findFunctionPath, rejectDataOnlyFunctions } from "./data-only.js";
+
+const UTF8_BYTE_LENGTH_SOURCE = `function(value) {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) continue;
+    if (codePoint <= 0x7f) bytes += 1;
+    else if (codePoint <= 0x7ff) bytes += 2;
+    else if (codePoint <= 0xffff) bytes += 3;
+    else {
+      bytes += 4;
+      index += 1;
+    }
+  }
+  return bytes;
+}`;
 
 /**
  * Executor implementation using isolated-vm (V8 isolates).
@@ -6,26 +26,39 @@ import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../t
  *
  * Each execute() call creates a fresh V8 isolate with its own heap — no state
  * leaks between calls. The sandbox has zero I/O capabilities by default (no
- * fetch, no fs, no require). The only way out is through injected host functions.
+ * fetch, no fs, no require). Host callbacks fail closed; use LLRT for
+ * request-capable execution.
  */
 export class IsolatedVMExecutor implements Executor {
   private memoryMB: number;
   private timeoutMs: number;
   private wallTimeMs: number;
+  private maxResultBytes: number;
 
   constructor(options: SandboxOptions = {}) {
     this.memoryMB = options.memoryMB ?? 64;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.wallTimeMs = options.wallTimeMs ?? 60_000;
+    this.maxResultBytes = options.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
   }
 
   async execute(
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
+    if (hasHostFunctions(globals)) {
+      return {
+        result: undefined,
+        error:
+          "IsolatedVMExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution",
+        stats: emptyStats(0, this.memoryMB),
+      };
+    }
+
     // @ts-ignore — optional peer dependency
     const ivm = (await import("isolated-vm")).default ?? (await import("isolated-vm"));
     const isolate = new ivm.Isolate({ memoryLimit: this.memoryMB });
+    const abortController = new AbortController();
 
     let context: Awaited<ReturnType<typeof isolate.createContext>> | undefined;
     try {
@@ -47,61 +80,29 @@ export class IsolatedVMExecutor implements Executor {
       // Inject globals — sequential awaits required: each jail.set/context.eval
       // depends on prior state (ref counters, globalThis assignments).
       /* oxlint-disable no-await-in-loop */
-      let refCounter = 0;
       for (const [name, value] of Object.entries(globals)) {
-        if (typeof value === "function") {
-          // Async host function: set Reference, wrap with .apply() in isolate
-          const refName = `__ref${refCounter++}`;
-          await jail.set(refName, new ivm.Reference(value));
-          await context.eval(`
-            globalThis[${JSON.stringify(name)}] = function(...args) {
-              return ${refName}.apply(undefined, args, {
-                arguments: { copy: true },
-                result: { promise: true, copy: true },
-              });
-            };
-          `);
-        } else if (isNamespaceWithMethods(value)) {
-          // Namespace object with methods (e.g. { request: fn })
-          const ns = value as Record<string, unknown>;
-          let nsSetup = `globalThis[${JSON.stringify(name)}] = {};\n`;
-
-          for (const [key, val] of Object.entries(ns)) {
-            if (typeof val === "function") {
-              const refName = `__ref${refCounter++}`;
-              await jail.set(refName, new ivm.Reference(val));
-              nsSetup += `
-                globalThis[${JSON.stringify(name)}][${JSON.stringify(key)}] = function(...args) {
-                  return ${refName}.apply(undefined, args, {
-                    arguments: { copy: true },
-                    result: { promise: true, copy: true },
-                  });
-                };
-              `;
-            }
-          }
-
-          // Inject non-function properties as JSON
-          const dataProps = Object.entries(ns).filter(([, v]) => typeof v !== "function");
-          if (dataProps.length > 0) {
-            const dataObj = Object.fromEntries(dataProps);
-            nsSetup += `Object.assign(globalThis[${JSON.stringify(name)}], ${JSON.stringify(dataObj)});\n`;
-          }
-
-          await context.eval(nsSetup);
-        } else {
-          // Plain data: inject as JSON
-          await context.eval(
-            `globalThis[${JSON.stringify(name)}] = ${JSON.stringify(value)};`,
-          );
-        }
+        // Plain data: inject as JSON
+        await context.eval(
+          `globalThis[${JSON.stringify(name)}] = ${JSON.stringify(value)};`,
+        );
       }
       /* oxlint-enable no-await-in-loop */
 
       // Execute the code with both CPU timeout and wall-clock timeout.
       // The ivm timeout only covers CPU time; async host calls (request bridge)
       // can stall indefinitely without a wall-clock guard.
-      const wrappedCode = `(${code})()`;
+      const wrappedCode = `(async () => {
+        const __codemodeJsonStringify = JSON.stringify.bind(JSON);
+        const __codemodeUtf8ByteLength = ${UTF8_BYTE_LENGTH_SOURCE};
+        const result = await (${code})();
+        if (result === undefined) return "__cmUndef";
+        const resultJson = __codemodeJsonStringify(result);
+        if (resultJson === undefined) return "__cmUndef";
+        if (__codemodeUtf8ByteLength(resultJson) > ${this.maxResultBytes}) {
+          throw new Error("Execution result exceeds limit of ${this.maxResultBytes} bytes");
+        }
+        return resultJson;
+      })()`;
       const script = await isolate.compileScript(wrappedCode);
 
       let wallTimer: ReturnType<typeof setTimeout> | undefined;
@@ -113,7 +114,10 @@ export class IsolatedVMExecutor implements Executor {
         }).finally(() => clearTimeout(wallTimer)),
         new Promise<never>((_, reject) => {
           wallTimer = setTimeout(
-            () => reject(new Error("Wall-clock timeout exceeded")),
+            () => {
+              abortController.abort();
+              reject(new Error("Wall-clock timeout exceeded"));
+            },
             this.wallTimeMs,
           );
           // Don't prevent process exit
@@ -124,7 +128,8 @@ export class IsolatedVMExecutor implements Executor {
       ]);
 
       const stats = captureStats(isolate);
-      return { result, stats };
+      validateExecutionResult(result, this.maxResultBytes);
+      return { result: parseExecutionResult(result), stats };
     } catch (err) {
       const stats = captureStats(isolate);
       return {
@@ -134,10 +139,21 @@ export class IsolatedVMExecutor implements Executor {
       };
     } finally {
       context?.release();
+      abortController.abort();
       if (!isolate.isDisposed) {
         isolate.dispose();
       }
     }
+  }
+
+  async executeData(
+    code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    const rejection = rejectDataOnlyFunctions(input, emptyStats(0, this.memoryMB));
+    if (rejection) return rejection;
+
+    return await this.execute(code, input);
   }
 }
 
@@ -177,13 +193,42 @@ function captureStats(isolate: { isDisposed: boolean; cpuTime: bigint; wallTime:
   };
 }
 
-function isNamespaceWithMethods(value: unknown): boolean {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.values(value as Record<string, unknown>).some(
-      (v) => typeof v === "function",
-    )
-  );
+function hasHostFunctions(globals: Record<string, unknown>): boolean {
+  return findFunctionPath(globals) !== null;
+}
+
+function validateExecutionResult(result: unknown, maxResultBytes: number): void {
+  if (result === "__cmUndef" || result === undefined) return;
+  if (typeof result !== "string") {
+    throw new Error("Execution result serialization returned a non-string value");
+  }
+  if (Buffer.byteLength(result, "utf8") > maxResultBytes) {
+    throw new Error(`Execution result exceeds limit of ${maxResultBytes} bytes`);
+  }
+}
+
+function emptyStats(wallTimeMs: number, memoryMB: number): ExecuteStats {
+  return {
+    cpuTimeMs: wallTimeMs,
+    wallTimeMs,
+    heapUsedBytes: 0,
+    heapTotalBytes: 0,
+    externalBytes: 0,
+    heapSizeLimitBytes: memoryMB * 1024 * 1024,
+    totalPhysicalBytes: 0,
+    availableBytes: memoryMB * 1024 * 1024,
+    executableBytes: 0,
+    mallocedBytes: 0,
+    peakMallocedBytes: 0,
+  };
+}
+
+function parseExecutionResult(result: unknown): unknown {
+  if (result === "__cmUndef" || result === undefined) {
+    return undefined;
+  }
+  if (typeof result !== "string") {
+    return result;
+  }
+  return JSON.parse(result);
 }

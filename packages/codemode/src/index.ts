@@ -3,7 +3,10 @@ export { CodeMode } from "./codemode.js";
 
 // Types
 export type {
+  CapabilityExecutor,
+  CapabilityManifest,
   CodeModeOptions,
+  DataExecutor,
   Executor,
   ExecuteResult,
   ExecuteStats,
@@ -13,6 +16,10 @@ export type {
   SpecProvider,
   ToolCallResult,
   ToolDefinition,
+} from "./types.js";
+export {
+  emptyExecuteStats,
+  isCapabilityExecutor,
 } from "./types.js";
 
 // Executors (for advanced usage / custom executor selection)

@@ -3,8 +3,8 @@ import type { Executor, SandboxOptions } from "../types.js";
 /**
  * Detect whether we're running under Bun. On Bun, isolated-vm cannot dlopen
  * (it relies on V8 symbols like `v8::ValueSerializer::Delegate::IsHostObject`
- * that Bun's JavaScriptCore engine does not export), so we prefer the WASM
- * QuickJS backend.
+ * that Bun's JavaScriptCore engine does not export), so the automatic runtime
+ * selector tries LLRT only and fails closed if it is unavailable.
  *
  * Uses Bun's officially documented detection pattern:
  * https://bun.com/docs/guides/util/detect-bun
@@ -25,25 +25,23 @@ function isBun(): boolean {
  *   - **LLRT native** → first when `@robinbraemer/llrt` is installed. This is
  *     the lightweight default candidate and satisfies the shared executor
  *     contract, including host callbacks.
- *   - **Bun** → QuickJS first (isolated-vm cannot load native bindings under
- *     JavaScriptCore), fall back to isolated-vm only if QuickJS isn't
- *     installed.
- *   - **Node without LLRT** → isolated-vm first (mature V8 isolates), then
- *     QuickJS if isolated-vm isn't installed (e.g. ARM Linux without build
- *     tools, or a Node minor without a prebuild).
+ *   - **Node without LLRT** → isolated-vm for data-only sandbox execution.
  *
- * QuickJS is a compatibility fallback, not a recommended production backend.
- * See `QuickJSExecutor`'s docstring for the upstream `quickjs-emscripten`
- * bugs it inherits.
+ * QuickJS remains available as an explicit advanced executor, but the automatic
+ * selector intentionally does not choose it. Its `quickjs-emscripten` host
+ * callback bridge cannot enforce byte limits before values cross into host JS
+ * without re-triggering upstream asyncify crashes, so auto-selection fails
+ * closed instead of silently weakening host-boundary controls.
+ *
+ * Request-capable execution requires LLRT. The non-LLRT fallback executors
+ * reject host function globals rather than exposing weaker host bridges.
  *
  * All sandbox runtimes are optional peer dependencies.
  */
 export async function createExecutor(
   options: SandboxOptions = {},
 ): Promise<Executor> {
-  const order = isBun()
-    ? (["llrt", "quickjs", "isolated-vm"] as const)
-    : (["llrt", "isolated-vm", "quickjs"] as const);
+  const order = autoExecutorBackendOrder();
 
   /* oxlint-disable no-await-in-loop */
   for (const backend of order) {
@@ -59,34 +57,32 @@ export async function createExecutor(
 
       const { LlrtNativeExecutor } = await import("./llrt-native.js");
       return new LlrtNativeExecutor(options);
-    } else if (backend === "isolated-vm") {
+    } else {
       try {
         // @ts-ignore — optional peer dependency
         await import("isolated-vm");
         const { IsolatedVMExecutor } = await import("./isolated-vm.js");
         return new IsolatedVMExecutor(options);
-      } catch {
-        // not available — try the next backend
-      }
-    } else {
-      try {
-        // @ts-ignore — optional peer dependency
-        await import("quickjs-emscripten");
-        const { QuickJSExecutor } = await import("./quickjs.js");
-        return new QuickJSExecutor(options);
-      } catch {
-        // not available — try the next backend
+      } catch (error) {
+        if (isMissingOptionalDependency(error, "isolated-vm")) {
+          continue;
+        }
+        throw error;
       }
     }
   }
   /* oxlint-enable no-await-in-loop */
 
   throw new Error(
-    "No sandbox runtime found. Install one of:\n" +
+      "No sandbox runtime found. Install one of:\n" +
       "  npm install @robinbraemer/llrt   # Native LLRT (default candidate)\n" +
-      "  npm install isolated-vm          # V8 isolates (Node.js fallback)\n" +
-      "  npm install quickjs-emscripten   # WASM QuickJS (Bun, Workers, browser)",
+      "  npm install isolated-vm          # Data-only V8 isolate fallback\n" +
+      "QuickJS is available only by passing new QuickJSExecutor(...) explicitly.",
   );
+}
+
+export function autoExecutorBackendOrder(): readonly ("llrt" | "isolated-vm")[] {
+  return isBun() ? ["llrt"] : ["llrt", "isolated-vm"];
 }
 
 export function isMissingOptionalDependency(

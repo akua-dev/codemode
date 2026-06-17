@@ -57,6 +57,18 @@ describe("LlrtProcessExecutor", () => {
     expect(result.error).toContain("does not support globals");
   });
 
+  it("executes data-only code with JSON globals", async () => {
+    const executor = new LlrtProcessExecutor({ binaryPath: await createFakeLlrtBinary() });
+
+    const result = await executor.executeData(
+      `async () => spec.info.title`,
+      { spec: { info: { title: "API" } } },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toBe("API");
+  });
+
   it("enforces wall-clock timeout for a stuck process", async () => {
     const executor = new LlrtProcessExecutor({
       binaryPath: await createFakeLlrtBinary(),

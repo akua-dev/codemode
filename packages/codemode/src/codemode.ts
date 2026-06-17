@@ -1,4 +1,5 @@
 import { createExecutor } from "./executor/auto.js";
+import { DEFAULT_MAX_CODE_BYTES } from "./limits.js";
 import {
   createRequestBridge,
   type RequestBridgeContext,
@@ -17,6 +18,7 @@ import type {
   ToolCallResult,
   ToolDefinition,
 } from "./types.js";
+import { isCapabilityExecutor } from "./types.js";
 
 const RESERVED_NAMES = new Set([
   "Object", "Array", "Promise", "Function", "String", "Number", "Boolean",
@@ -79,6 +81,7 @@ export class CodeMode {
   private searchToolName: string;
   private executeToolName: string;
   private maxResponseTokens: number;
+  private maxCodeBytes: number;
 
   // Bridge config — a fresh bridge is created per execute() call
   // so the request counter resets each time.
@@ -98,6 +101,7 @@ export class CodeMode {
     this.searchToolName = "search";
     this.executeToolName = "execute";
     this.maxResponseTokens = options.maxResponseTokens ?? 6_000;
+    this.maxCodeBytes = options.maxCodeBytes ?? DEFAULT_MAX_CODE_BYTES;
 
     validateNamespace(this.namespace);
 
@@ -105,6 +109,7 @@ export class CodeMode {
     this.bridgeBaseUrl = options.baseUrl ?? "http://localhost";
     this.bridgeOptions = {
       maxRequests: options.maxRequests,
+      maxConcurrentRequests: options.maxConcurrentRequests,
       maxRequestBytes: options.maxRequestBytes,
       maxResponseBytes: options.maxResponseBytes,
       allowedHeaders: options.allowedHeaders,
@@ -156,10 +161,12 @@ export class CodeMode {
    * All $refs are pre-resolved inline.
    */
   async search(code: string): Promise<ToolCallResult> {
+    const sizeError = this.validateCodeSize(code);
+    if (sizeError) return sizeError;
     const executor = await this.getExecutor();
     const spec = await this.getProcessedSpec();
 
-    const result = await executor.execute(code, { spec });
+    const result = await executor.executeData(code, { spec });
 
     return this.formatResult(result);
   }
@@ -169,21 +176,38 @@ export class CodeMode {
    * The code runs with `{namespace}.request()` available as a global.
    */
   async execute(code: string): Promise<ToolCallResult> {
+    const sizeError = this.validateCodeSize(code);
+    if (sizeError) return sizeError;
     const executor = await this.getExecutor();
+    if (!isCapabilityExecutor(executor)) {
+      return {
+        content: [{
+          type: "text",
+          text: "Error: The selected sandbox runtime does not support host functions or capability execution. Install @robinbraemer/llrt or pass a capability executor.",
+        }],
+        isError: true,
+      };
+    }
 
     // Fresh bridge per execution — request counter resets each time
     const bridge = createRequestBridge(
       this.bridgeHandler, this.bridgeBaseUrl, this.bridgeOptions,
     );
-    const client = {
-      request(this: RequestBridgeContext, options: SandboxRequestOptions) {
-        return bridge(options, this);
+    const result = await executor.executeWithCapabilities(
+      code,
+      {},
+      {
+        namespaces: {
+          [this.namespace]: {
+            request: {
+              call(this: RequestBridgeContext, options: SandboxRequestOptions) {
+                return bridge(options, this);
+              },
+            },
+          },
+        },
       },
-    };
-
-    const result = await executor.execute(code, {
-      [this.namespace]: client,
-    });
+    );
 
     return this.formatResult(result);
   }
@@ -246,13 +270,48 @@ export class CodeMode {
       };
     }
 
-    const resultText =
-      typeof result.result === "string"
-        ? result.result
-        : JSON.stringify(result.result, null, 2);
+    let resultText: string;
+    try {
+      resultText =
+        typeof result.result === "string"
+          ? result.result
+          : JSON.stringify(result.result, jsonReplacer, 2) ?? "undefined";
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Result serialization failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
 
     return {
       content: [{ type: "text", text: truncateResponse(resultText, this.maxResponseTokens) }],
     };
   }
+
+  private validateCodeSize(code: string): ToolCallResult | undefined {
+    const bytes = Buffer.byteLength(code, "utf8");
+    if (bytes <= this.maxCodeBytes) return undefined;
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Code too large: ${bytes} bytes exceeds limit of ${this.maxCodeBytes} bytes`,
+        },
+      ],
+      isError: true,
+    };
+  }
+}
+
+function jsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === "bigint") {
+    throw new TypeError("BigInt values cannot be returned from CodeMode tools");
+  }
+  return value;
 }
