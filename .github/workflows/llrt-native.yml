@@ -80,7 +80,7 @@ jobs:
       - name: Smoke-test packed install on native runner
         run: pnpm --filter @robinbraemer/llrt run smoke:packed-install
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: llrt-native-${{ matrix.platform_arch_abi }}
           path: packages/llrt/npm/${{ matrix.platform_arch_abi }}/llrt_node.${{ matrix.platform_arch_abi }}.node
