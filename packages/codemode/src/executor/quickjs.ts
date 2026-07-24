@@ -1,6 +1,10 @@
 import { DEFAULT_MAX_RESULT_BYTES } from "../limits.js";
 import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../types.js";
-import { findFunctionPath, rejectDataOnlyFunctions } from "./data-only.js";
+import {
+  dataOnlyViolationError,
+  findDataOnlyViolation,
+  rejectDataOnlyFunctions,
+} from "./data-only.js";
 
 const UTF8_BYTE_LENGTH_SOURCE = `function(value) {
   let bytes = 0;
@@ -106,11 +110,14 @@ export class QuickJSExecutor implements Executor {
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
     const start = Date.now();
-    if (hasHostFunctions(globals)) {
+    const violation = findDataOnlyViolation(globals);
+    if (violation) {
       return {
         result: undefined,
         error:
-          "QuickJSExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution",
+          violation.kind === "function"
+            ? "QuickJSExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution"
+            : dataOnlyViolationError(violation),
         stats: emptyStats(start, this.memoryMB),
       };
     }
@@ -502,10 +509,6 @@ function emptyStats(startMs: number, memoryMB: number): ExecuteStats {
     mallocedBytes: 0,
     peakMallocedBytes: 0,
   };
-}
-
-function hasHostFunctions(globals: Record<string, unknown>): boolean {
-  return findFunctionPath(globals) !== null;
 }
 
 /**

@@ -7,12 +7,15 @@ interface PendingNode {
   path: string;
 }
 
-type DataOnlyViolation =
+export type DataOnlyViolation =
   | { kind: "function"; path: string }
   | { kind: "accessor"; path: string }
   | { kind: "graph-too-large"; path: string };
 
-function findDataOnlyViolation(value: unknown, path = "input"): DataOnlyViolation | null {
+export function findDataOnlyViolation(
+  value: unknown,
+  path = "input",
+): DataOnlyViolation | null {
   const seen = new WeakSet<object>();
   const pending: PendingNode[] = [{ value, path }];
   let checked = 0;
@@ -79,7 +82,7 @@ export function dataOnlyFunctionError(functionPath: string): string {
   return `data-only execution does not accept function values at ${functionPath}`;
 }
 
-function dataOnlyViolationError(violation: DataOnlyViolation): string {
+export function dataOnlyViolationError(violation: DataOnlyViolation): string {
   switch (violation.kind) {
     case "function":
       return dataOnlyFunctionError(violation.path);

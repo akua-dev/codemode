@@ -2,7 +2,11 @@ import {
   DEFAULT_MAX_RESULT_BYTES,
 } from "../limits.js";
 import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../types.js";
-import { findFunctionPath, rejectDataOnlyFunctions } from "./data-only.js";
+import {
+  dataOnlyViolationError,
+  findDataOnlyViolation,
+  rejectDataOnlyFunctions,
+} from "./data-only.js";
 
 const UTF8_BYTE_LENGTH_SOURCE = `function(value) {
   let bytes = 0;
@@ -46,11 +50,14 @@ export class IsolatedVMExecutor implements Executor {
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
-    if (hasHostFunctions(globals)) {
+    const violation = findDataOnlyViolation(globals);
+    if (violation) {
       return {
         result: undefined,
         error:
-          "IsolatedVMExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution",
+          violation.kind === "function"
+            ? "IsolatedVMExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution"
+            : dataOnlyViolationError(violation),
         stats: emptyStats(0, this.memoryMB),
       };
     }
@@ -191,10 +198,6 @@ function captureStats(isolate: { isDisposed: boolean; cpuTime: bigint; wallTime:
     mallocedBytes: heap.malloced_memory ?? 0,
     peakMallocedBytes: heap.peak_malloced_memory ?? 0,
   };
-}
-
-function hasHostFunctions(globals: Record<string, unknown>): boolean {
-  return findFunctionPath(globals) !== null;
 }
 
 function validateExecutionResult(result: unknown, maxResultBytes: number): void {
