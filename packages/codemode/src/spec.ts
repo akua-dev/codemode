@@ -52,8 +52,11 @@ function resolveRefsWithContext(
       };
     }
 
-    // Only complete, context-independent results are cached.
-    if (cache.has(ref)) return { value: cache.get(ref), contextDependent: false };
+    // A finite expansion is reusable only with the same remaining depth budget.
+    const cacheKey = JSON.stringify([maxDepth - seen.size, ref]);
+    if (cache.has(cacheKey)) {
+      return { value: cache.get(cacheKey), contextDependent: false };
+    }
 
     const parts = ref.replace("#/", "").split("/");
     let resolved: unknown = root;
@@ -69,7 +72,7 @@ function resolveRefsWithContext(
     branchSeen.add(ref);
 
     const result = resolveRefsWithContext(resolved, root, branchSeen, maxDepth, cache);
-    if (!result.contextDependent) cache.set(ref, result.value);
+    if (!result.contextDependent) cache.set(cacheKey, result.value);
     return result;
   }
 

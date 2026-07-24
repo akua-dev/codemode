@@ -333,6 +333,44 @@ describe("processSpec", () => {
     expect(childSchema.properties.parent.properties.child).toEqual({ $circular: "#/components/schemas/Child" });
   });
 
+  it("keeps max-depth sentinels when a shallower endpoint has cached a ref", () => {
+    const spec = {
+      components: {
+        schemas: {
+          A: { type: "object", properties: { b: { $ref: "#/components/schemas/B" } } },
+          B: { type: "string" },
+          C: { type: "object", properties: { a: { $ref: "#/components/schemas/A" } } },
+        },
+      },
+      paths: {
+        "/a": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/A" } } } },
+            },
+          },
+        },
+        "/c": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/C" } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const paths = processSpec(spec, 2).paths as any;
+    const aSchema = paths["/a"].get.responses["200"].content["application/json"].schema;
+    const cSchema = paths["/c"].get.responses["200"].content["application/json"].schema;
+
+    expect(aSchema.properties.b.type).toBe("string");
+    expect(cSchema.properties.a.properties.b).toEqual({
+      $circular: "#/components/schemas/B",
+      $reason: "max depth exceeded",
+    });
+  });
+
   it("keeps high-reuse processed specs below the data-only graph guard", () => {
     const properties = Object.fromEntries(
       Array.from({ length: 500 }, (_, index) => [`field${index}`, { type: "string" }]),
