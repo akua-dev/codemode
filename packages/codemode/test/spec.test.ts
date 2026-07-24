@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { rejectDataOnlyFunctions } from "../src/executor/data-only.js";
 import { resolveRefs, processSpec, extractTags, extractServerBasePath } from "../src/spec.js";
+import { emptyExecuteStats } from "../src/types.js";
 
 describe("resolveRefs", () => {
   it("resolves simple $ref", () => {
@@ -242,6 +244,123 @@ describe("processSpec", () => {
     expect(test.get).toBeDefined();
     expect(test.parameters).toBeUndefined();
     expect(test.description).toBeUndefined();
+  });
+
+  it("shares acyclic component expansions across operations", () => {
+    const spec = {
+      components: {
+        schemas: {
+          Pet: { type: "object", properties: { name: { type: "string" } } },
+        },
+      },
+      paths: {
+        "/pets": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+            },
+          },
+        },
+        "/featured-pet": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const paths = processSpec(spec).paths as any;
+    const petsSchema = paths["/pets"].get.responses["200"].content["application/json"].schema;
+    const featuredPetSchema = paths["/featured-pet"].get.responses["200"].content["application/json"].schema;
+
+    expect(petsSchema.properties.name.type).toBe("string");
+    expect(featuredPetSchema.properties.name.type).toBe("string");
+    expect(petsSchema.$ref).toBeUndefined();
+    expect(featuredPetSchema.$ref).toBeUndefined();
+    expect(featuredPetSchema).toBe(petsSchema);
+  });
+
+  it("resolves mutually recursive component roots in each endpoint context", () => {
+    const spec = {
+      components: {
+        schemas: {
+          Parent: {
+            type: "object",
+            properties: {
+              parentName: { type: "string" },
+              child: { $ref: "#/components/schemas/Child" },
+            },
+          },
+          Child: {
+            type: "object",
+            properties: {
+              childAge: { type: "integer" },
+              parent: { $ref: "#/components/schemas/Parent" },
+            },
+          },
+        },
+      },
+      paths: {
+        "/parent": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Parent" } } } },
+            },
+          },
+        },
+        "/child": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Child" } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const paths = processSpec(spec).paths as any;
+    const parentSchema = paths["/parent"].get.responses["200"].content["application/json"].schema;
+    const childSchema = paths["/child"].get.responses["200"].content["application/json"].schema;
+
+    expect(parentSchema.properties.parentName.type).toBe("string");
+    expect(parentSchema.properties.child.properties.childAge.type).toBe("integer");
+    expect(parentSchema.properties.child.properties.parent).toEqual({ $circular: "#/components/schemas/Parent" });
+
+    expect(childSchema.properties.childAge.type).toBe("integer");
+    expect(childSchema.properties.parent.properties.parentName.type).toBe("string");
+    expect(childSchema.properties.parent.properties.child).toEqual({ $circular: "#/components/schemas/Child" });
+  });
+
+  it("keeps high-reuse processed specs below the data-only graph guard", () => {
+    const properties = Object.fromEntries(
+      Array.from({ length: 500 }, (_, index) => [`field${index}`, { type: "string" }]),
+    );
+    const paths = Object.fromEntries(
+      Array.from({ length: 300 }, (_, index) => [
+        `/resources/${index}`,
+        {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Resource" } } } },
+            },
+          },
+        },
+      ]),
+    );
+    const spec = {
+      components: {
+        schemas: {
+          Resource: { type: "object", properties },
+        },
+      },
+      paths,
+    };
+
+    const processed = processSpec(spec);
+
+    expect(rejectDataOnlyFunctions({ spec: processed }, emptyExecuteStats())).toBeNull();
   });
 });
 
