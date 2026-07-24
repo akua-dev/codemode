@@ -2,6 +2,12 @@ name: LLRT Native Packages
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the LLRT package family
+        required: false
+        default: false
+        type: boolean
   pull_request:
     branches: [main]
     paths:
@@ -20,8 +26,10 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "Taskfile.yml"
-  release:
-    types: [published]
+
+concurrency:
+  group: llrt-native-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -131,19 +139,19 @@ jobs:
       - run: pnpm --filter @robinbraemer/llrt run smoke:packed-install
 
       - name: Prepare native package metadata
-        if: github.event_name == 'release'
+        if: inputs.publish && github.ref == 'refs/heads/main'
         env:
           GITHUB_REPOSITORY: ""
         run: pnpm --filter @robinbraemer/llrt run prepare:native-publish
 
       - name: Publish optional native packages
-        if: github.event_name == 'release'
+        if: inputs.publish && github.ref == 'refs/heads/main'
         run: |
           for package_dir in packages/llrt/npm/*; do
             (cd "${package_dir}" && npm publish --access public)
           done
 
       - name: Publish main LLRT package
-        if: github.event_name == 'release'
+        if: inputs.publish && github.ref == 'refs/heads/main'
         run: npm publish --access public
         working-directory: packages/llrt

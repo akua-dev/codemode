@@ -17,6 +17,32 @@ function getNamedStep(workflow: string, stepName: string) {
 }
 
 describe("LLRT native prebuild workflow", () => {
+
+  it("publishes only through an explicit LLRT release dispatch", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const publishCondition = "if: inputs.publish && github.ref == 'refs/heads/main'";
+
+    expect(workflow).not.toContain("  release:\n    types: [published]");
+    expect(workflow).toContain("publish:\n        description: Publish the LLRT package family");
+    expect(workflow).toContain("default: false");
+    expect(workflow).toContain("type: boolean");
+    for (const stepName of [
+      "Prepare native package metadata",
+      "Publish optional native packages",
+      "Publish main LLRT package",
+    ]) {
+      expect(getNamedStep(workflow, stepName)).toContain(publishCondition);
+    }
+  });
+
+  it("serializes LLRT package runs without cancelling an active publish", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+
+    expect(workflow).toContain("concurrency:");
+    expect(workflow).toContain("group: llrt-native-${{ github.ref }}");
+    expect(workflow).toContain("cancel-in-progress: false");
+  });
+
   it("builds every napi target declared by the package manifest", () => {
     const workflow = readFileSync(workflowPath, "utf8");
 
