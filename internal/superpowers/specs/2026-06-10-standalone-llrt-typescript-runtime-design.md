@@ -235,7 +235,7 @@ It builds every declared napi target on an explicit GitHub-hosted runner:
 The workflow dry-run-packs each optional native package, uploads the native
 artifact, assembles all artifacts in a packaging job, dry-run-packs the main
 package and optional packages together, and publishes the LLRT package family
-only for release events.
+only when manually dispatched with publishing enabled on the `main` branch.
 
 `pnpm --filter @robinbraemer/llrt run verify:native-artifacts` verifies that
 the optional native package manifests match the root package's declared
