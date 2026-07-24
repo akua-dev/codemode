@@ -362,6 +362,63 @@ describe("CodeMode", () => {
       const paths = JSON.parse(result.content[0]!.text);
       expect(paths).toContain("/v1/clusters");
     });
+
+    it("shares an in-flight async spec provider across concurrent searches", async () => {
+      let resolveSpec: (spec: typeof testSpec) => void;
+      const pendingSpec = new Promise<typeof testSpec>((resolve) => {
+        resolveSpec = resolve;
+      });
+      let providerCalls = 0;
+      const executor = new TestExecutor();
+      const cm = new CodeMode({
+        spec: async () => {
+          providerCalls += 1;
+          return await pendingSpec;
+        },
+        request: testHandler,
+        executor,
+      });
+
+      const firstSearch = cm.search("async () => Object.keys(spec.paths)");
+      const secondSearch = cm.search("async () => Object.keys(spec.paths)");
+
+      await Promise.resolve();
+      expect(providerCalls).toBe(1);
+
+      resolveSpec!(testSpec);
+      const [firstResult, secondResult] = await Promise.all([
+        firstSearch,
+        secondSearch,
+      ]);
+
+      expect(firstResult.isError).toBeUndefined();
+      expect(secondResult.isError).toBeUndefined();
+      expect(executor.dataCalls).toBe(2);
+    });
+
+    it("retries the async spec provider after a failed search", async () => {
+      let providerCalls = 0;
+      const executor = new TestExecutor();
+      const cm = new CodeMode({
+        spec: async () => {
+          providerCalls += 1;
+          if (providerCalls === 1) throw new Error("spec unavailable");
+          return testSpec;
+        },
+        request: testHandler,
+        executor,
+      });
+
+      await expect(cm.search("async () => Object.keys(spec.paths)")).rejects.toThrow(
+        "spec unavailable",
+      );
+
+      const result = await cm.search("async () => Object.keys(spec.paths)");
+
+      expect(result.isError).toBeUndefined();
+      expect(providerCalls).toBe(2);
+      expect(executor.dataCalls).toBe(1);
+    });
   });
 
   describe("execute()", () => {

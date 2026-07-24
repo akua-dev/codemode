@@ -91,6 +91,7 @@ export class CodeMode {
 
   // Cached processed spec & context for tool descriptions
   private processedSpec: Record<string, unknown> | null = null;
+  private processedSpecPromise: Promise<Record<string, unknown>> | null = null;
   private specContext: { tags: string[]; endpointCount: number } | null = null;
 
   constructor(options: CodeModeOptions) {
@@ -233,15 +234,30 @@ export class CodeMode {
   private async getProcessedSpec(): Promise<Record<string, unknown>> {
     if (this.processedSpec) return this.processedSpec;
 
-    const raw = await this.resolveSpec();
-    this.processedSpec = processSpec(raw, this.options.maxRefDepth);
+    if (!this.processedSpecPromise) {
+      const processedSpecPromise = this.resolveSpec().then((raw) => {
+        const processedSpec = processSpec(raw, this.options.maxRefDepth);
 
-    // Extract context for tool descriptions
-    const tags = extractTags(raw);
-    const endpointCount = Object.keys(raw.paths ?? {}).length;
-    this.specContext = { tags, endpointCount };
+        // Extract context for tool descriptions
+        const tags = extractTags(raw);
+        const endpointCount = Object.keys(raw.paths ?? {}).length;
+        this.specContext = { tags, endpointCount };
+        this.processedSpec = processedSpec;
+        if (this.processedSpecPromise === processedSpecPromise) {
+          this.processedSpecPromise = null;
+        }
 
-    return this.processedSpec;
+        return processedSpec;
+      });
+      this.processedSpecPromise = processedSpecPromise;
+      void processedSpecPromise.catch(() => {
+        if (this.processedSpecPromise === processedSpecPromise) {
+          this.processedSpecPromise = null;
+        }
+      });
+    }
+
+    return this.processedSpecPromise;
   }
 
   private async getExecutor(): Promise<Executor> {
