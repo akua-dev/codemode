@@ -14,6 +14,13 @@ describe("codemode package publication", () => {
     expect(codemodePackageJson.devDependencies["@robinbraemer/llrt"]).toBe("workspace:*");
   });
 
+  it("declares the exact GitHub repository trusted to publish this package", () => {
+    expect(codemodePackageJson.repository).toEqual({
+      type: "git",
+      url: "git+https://github.com/akua-dev/codemode.git",
+    });
+  });
+
   it("publishes from the package directory with the npm CLI", () => {
     const workflow = readFileSync(publishWorkflowPath, "utf8");
 
