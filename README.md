@@ -14,7 +14,7 @@ This is the same pattern [Cloudflare uses](https://blog.cloudflare.com/code-mode
 Requires [mise](https://mise.jdx.dev/) for tooling (Node.js, pnpm, Task):
 
 ```bash
-git clone https://github.com/cnap-tech/codemode.git
+git clone https://github.com/akua-dev/codemode.git
 cd codemode
 mise install   # installs Node 24, pnpm 10, Task
 task install   # installs dependencies

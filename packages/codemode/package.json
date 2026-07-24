@@ -44,7 +44,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cnap-tech/codemode.git"
+    "url": "git+https://github.com/akua-dev/codemode.git"
   },
   "peerDependencies": {
     "@robinbraemer/llrt": "^0.2.0",
