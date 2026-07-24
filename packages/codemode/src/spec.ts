@@ -88,8 +88,9 @@ function resolveRefsWithContext(
 }
 
 /**
- * Recursively resolve all `$ref` pointers in an OpenAPI spec inline.
- * Circular references are replaced with `{ $circular: ref }`.
+ * Recursively resolve resolvable `$ref` pointers in an OpenAPI spec inline.
+ * Circular references and refs beyond the depth limit are replaced with
+ * markers describing why expansion stopped.
  *
  * The `seen` set tracks the current ancestor chain only (not globally),
  * so the same $ref used in sibling positions resolves correctly.
@@ -141,9 +142,10 @@ export function extractServerBasePath(spec: OpenAPISpec): string {
 
 /**
  * Process an OpenAPI spec into a simplified format for the search tool.
- * Resolves all $refs inline and extracts only the fields needed for search.
+ * Resolves resolvable $refs inline and extracts only the fields needed for search.
  * Prepends the server base path to all path keys so they're directly usable.
- * Only paths are returned — info and components are omitted since refs are resolved inline.
+ * Only paths are returned — info and components are omitted because the search
+ * view contains the fields extracted from operations and their resolved refs.
  *
  * @param maxRefDepth - Maximum $ref resolution depth (default: 50)
  */
@@ -197,7 +199,7 @@ export function processSpec(
     }
   }
 
-  // Only paths — info and components are omitted since all $refs are resolved inline.
+  // Only paths — info and components are omitted from the search view.
   return { paths };
 }
 

@@ -163,7 +163,8 @@ export class CodeMode {
   /**
    * Execute a search against the OpenAPI spec.
    * The code runs in a sandbox with `spec` available as a global.
-   * All $refs are pre-resolved inline.
+   * Resolvable $refs are expanded inline; circular and max-depth refs remain
+   * marked in the processed search view.
    */
   async search(code: string): Promise<ToolCallResult> {
     const sizeError = this.validateCodeSize(code);
@@ -240,7 +241,7 @@ export class CodeMode {
   }
 
   /**
-   * Get the processed spec (refs resolved, fields extracted).
+   * Get the processed spec (resolvable refs expanded, fields extracted).
    * Caches the result after first call.
    */
   private async getProcessedSpec(): Promise<Record<string, unknown>> {

@@ -200,7 +200,7 @@ async () => {
   return results;
 }
 
-// Get endpoint with requestBody schema (refs are already resolved)
+// Get endpoint with requestBody schema (resolvable refs are expanded)
 async () => {
   const op = spec.paths['/v1/products']?.post;
   return { summary: op?.summary, requestBody: op?.requestBody };
@@ -267,7 +267,7 @@ CodeMode automatically preprocesses your OpenAPI spec before passing it to the s
 
 - **`$ref` resolution** — resolvable `$ref` pointers are expanded inline; circular refs become `{ $circular: ref }`, and refs beyond `maxRefDepth` become `{ $circular: ref, $reason: "max depth exceeded" }`
 - **Field extraction** — only essential fields kept per operation: `summary`, `description`, `tags`, `parameters`, `requestBody`, `responses`
-- **Output shape** — only `{ paths }` is passed to search; `info`, `servers`, and `components` are omitted because referenced data is expanded into the paths view
+- **Output shape** — only `{ paths }` is passed to search; `info`, `servers`, and `components` are omitted because operation fields and resolved references are represented in the paths view
 
 You can also use the preprocessing utilities directly:
 
@@ -325,17 +325,35 @@ Implement the `Executor` interface to use your own sandbox:
 
 CodeMode passes a fresh structured clone of the processed spec to each `search()` call, so mutations made by a custom executor cannot change later searches.
 
+CodeMode calls `executeData()` for `search()` and `executeWithCapabilities()` for `execute()`. Implement the latter when the custom runtime needs to expose the request capability; the legacy `execute()` method remains available for direct executor use.
+
 ```typescript
-import { CodeMode, type Executor, type ExecuteResult } from '@robinbraemer/codemode';
+import {
+  CodeMode,
+  emptyExecuteStats,
+  type CapabilityManifest,
+  type ExecuteResult,
+  type Executor,
+} from '@robinbraemer/codemode';
 
 class MyExecutor implements Executor {
-  async execute(code: string, globals: Record<string, unknown>): Promise<ExecuteResult> {
-    // `code` is an async arrow function as a string: "async () => { ... }"
-    // `globals` contains named values to inject:
-    //   - plain data (objects, arrays, primitives) → read-only values
-    //   - functions → callable host functions
-    //   - objects with function values → namespace with callable methods
-    return { result: ..., logs: [] };
+  async executeData(_code: string, _input: Record<string, unknown>): Promise<ExecuteResult> {
+    // Run data-only code in the sandbox.
+    return { result: undefined, stats: emptyExecuteStats() };
+  }
+
+  async executeWithCapabilities(
+    _code: string,
+    _input: Record<string, unknown>,
+    _capabilities: CapabilityManifest,
+  ): Promise<ExecuteResult> {
+    // Run code with declared capabilities, such as `{namespace}.request()`.
+    return { result: undefined, stats: emptyExecuteStats() };
+  }
+
+  async execute(_code: string, _globals: Record<string, unknown>): Promise<ExecuteResult> {
+    // Legacy direct-executor entrypoint.
+    return { result: undefined, stats: emptyExecuteStats() };
   }
 
   dispose() { /* clean up */ }
