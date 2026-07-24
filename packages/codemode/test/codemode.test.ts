@@ -349,6 +349,31 @@ describe("CodeMode", () => {
       ]);
     });
 
+    it("reports data-only spec violations before cloning the search input", async () => {
+      const cm = new CodeMode({
+        spec: {
+          paths: {
+            "/invalid": {
+              get: {
+                responses: {
+                  "200": { description: () => "not data-only" },
+                },
+              },
+            },
+          },
+        },
+        request: testHandler,
+        executor: new TestExecutor(),
+      });
+
+      const result = await cm.search("async () => 1");
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toBe(
+        "Error: data-only execution does not accept function values at input.spec.paths./invalid.get.responses.200.description",
+      );
+    });
+
     it("supports spec as async getter", async () => {
       const cm = new CodeMode({
         spec: async () => testSpec,

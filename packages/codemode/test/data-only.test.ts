@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  findFunctionPath,
+  findDataOnlyViolation,
   rejectDataOnlyFunctions,
   rejectDataOnlyTransport,
 } from "../src/executor/data-only.js";
@@ -39,9 +39,6 @@ describe("data-only input guard", () => {
       "data-only execution does not accept accessor properties at input.danger",
     );
     expect(rejection?.error).not.toContain("function values");
-    expect(findFunctionPath(input)).toBe(
-      "input.danger (accessor property is not data-only)",
-    );
   });
 
   it("reports object graphs that exceed the guard limit with their path", () => {
@@ -53,7 +50,6 @@ describe("data-only input guard", () => {
       "data-only execution input graph exceeds 100000 nodes at input.entries[99998]",
     );
     expect(rejection?.error).not.toContain("function values");
-    expect(findFunctionPath(input)).toBe("input.entries[99998] (object graph too large)");
   });
 
   it("checks only present entries in sparse arrays", () => {
@@ -61,7 +57,7 @@ describe("data-only input guard", () => {
     input.length = 1_000_000;
     input[999_999] = () => "blocked";
 
-    expect(findFunctionPath(input)).toBe("input[999999]");
+    expect(findDataOnlyViolation(input)?.path).toBe("input[999999]");
   });
 
   it("rejects alias fan-out that exceeds the expanded transport budget", () => {
@@ -108,6 +104,15 @@ describe("data-only input guard", () => {
     expect(rejection?.error).toBe(
       "data-only execution does not accept custom toJSON serialization at input.value.toJSON",
     );
+  });
+
+  it("accepts native Date JSON serialization", () => {
+    const rejection = rejectDataOnlyTransport(
+      { value: new Date("2026-07-24T00:00:00.000Z") },
+      emptyExecuteStats(),
+    );
+
+    expect(rejection).toBeNull();
   });
 
   it("rejects bigint values consistently across JSON transports", () => {

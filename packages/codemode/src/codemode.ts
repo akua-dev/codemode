@@ -1,4 +1,8 @@
 import { createExecutor } from "./executor/auto.js";
+import {
+  dataOnlyViolationError,
+  findDataOnlyTransportViolation,
+} from "./executor/data-only.js";
 import { DEFAULT_MAX_CODE_BYTES } from "./limits.js";
 import {
   createRequestBridge,
@@ -166,6 +170,14 @@ export class CodeMode {
     if (sizeError) return sizeError;
     const executor = await this.getExecutor();
     const spec = await this.getProcessedSpec();
+    const input = { spec };
+    const violation = findDataOnlyTransportViolation(input);
+    if (violation) {
+      return this.formatResult({
+        result: undefined,
+        error: dataOnlyViolationError(violation),
+      });
+    }
 
     const result = await executor.executeData(code, { spec: structuredClone(spec) });
 

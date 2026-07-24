@@ -340,20 +340,43 @@ function findJSONSerializationIssue(
 ): JSONSerializationIssue | null {
   if (cache.has(value)) return cache.get(value) ?? null;
 
-  const descriptor = Object.getOwnPropertyDescriptor(value, "toJSON");
   let issue: JSONSerializationIssue | null;
-  if (descriptor) {
-    issue = !("value" in descriptor)
-      ? "accessor"
-      : typeof descriptor.value === "function"
-        ? "custom-to-json"
-        : null;
+  if (hasNativeDateToJSON(value)) {
+    issue = null;
   } else {
-    const prototype = Object.getPrototypeOf(value) as object | null;
-    issue = prototype ? findJSONSerializationIssue(prototype, cache) : null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, "toJSON");
+    if (descriptor) {
+      issue = !("value" in descriptor)
+        ? "accessor"
+        : typeof descriptor.value === "function"
+          ? "custom-to-json"
+          : null;
+    } else {
+      const prototype = Object.getPrototypeOf(value) as object | null;
+      issue = prototype ? findJSONSerializationIssue(prototype, cache) : null;
+    }
   }
   cache.set(value, issue);
   return issue;
+}
+
+function hasNativeDateToJSON(value: object): boolean {
+  try {
+    Date.prototype.getTime.call(value);
+  } catch {
+    return false;
+  }
+
+  let current: object | null = value;
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+    if (descriptor) {
+      return "value" in descriptor && descriptor.value === Date.prototype.toJSON;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+
+  return false;
 }
 
 function jsonStringByteLength(value: string): number {
@@ -391,20 +414,6 @@ function jsonStringByteLength(value: string): number {
     }
   }
   return bytes;
-}
-
-export function findFunctionPath(value: unknown, path = "input"): string | null {
-  const violation = findDataOnlyViolation(value, path);
-  if (!violation) return null;
-
-  switch (violation.kind) {
-    case "function":
-      return violation.path;
-    case "accessor":
-      return `${violation.path} (accessor property is not data-only)`;
-    case "graph-too-large":
-      return `${violation.path} (object graph too large)`;
-  }
 }
 
 export function dataOnlyFunctionError(functionPath: string): string {
