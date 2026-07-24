@@ -74,6 +74,45 @@ class TestExecutor implements Executor {
   }
 }
 
+type SearchSchema = {
+  type?: string;
+  properties?: Record<string, SearchSchema>;
+};
+
+function responseSchema(input: Record<string, unknown>, path: string): SearchSchema {
+  const spec = input.spec as {
+    paths: Record<string, {
+      get: {
+        responses: Record<string, {
+          content: Record<string, { schema: SearchSchema }>;
+        }>;
+      };
+    }>;
+  };
+  return spec.paths[path]!.get.responses["200"]!.content["application/json"]!.schema;
+}
+
+class MutatingSearchExecutor extends TestExecutor {
+  observations: Array<{ schemasAreShared: boolean; nameType: string | undefined }> = [];
+
+  override async executeData(
+    _code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    this.dataCalls += 1;
+    const petsSchema = responseSchema(input, "/pets");
+    const featuredPetsSchema = responseSchema(input, "/featured-pets");
+
+    this.observations.push({
+      schemasAreShared: petsSchema === featuredPetsSchema,
+      nameType: petsSchema.properties?.name?.type,
+    });
+    petsSchema.properties!.name!.type = "mutated";
+
+    return { result: null };
+  }
+}
+
 const testSpec = {
   openapi: "3.0.0",
   info: { title: "Test API", version: "1.0.0" },
@@ -269,6 +308,45 @@ describe("CodeMode", () => {
       });
       expect(executor.dataCalls).toBe(1);
       expect(executor.calls).toBe(0);
+    });
+
+    it("isolates cached specs from custom data executor mutations", async () => {
+      const executor = new MutatingSearchExecutor();
+      const cm = new CodeMode({
+        spec: {
+          components: {
+            schemas: {
+              Pet: { type: "object", properties: { name: { type: "string" } } },
+            },
+          },
+          paths: {
+            "/pets": {
+              get: {
+                responses: {
+                  "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+                },
+              },
+            },
+            "/featured-pets": {
+              get: {
+                responses: {
+                  "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+                },
+              },
+            },
+          },
+        },
+        request: testHandler,
+        executor,
+      });
+
+      await cm.search("async () => null");
+      await cm.search("async () => null");
+
+      expect(executor.observations).toEqual([
+        { schemasAreShared: true, nameType: "string" },
+        { schemasAreShared: true, nameType: "string" },
+      ]);
     });
 
     it("supports spec as async getter", async () => {

@@ -166,7 +166,7 @@ export class CodeMode {
     const executor = await this.getExecutor();
     const spec = await this.getProcessedSpec();
 
-    const result = await executor.executeData(code, { spec });
+    const result = await executor.executeData(code, { spec: structuredClone(spec) });
 
     return this.formatResult(result);
   }

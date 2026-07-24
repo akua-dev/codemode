@@ -3,6 +3,25 @@ import { rejectDataOnlyFunctions } from "../src/executor/data-only.js";
 import { resolveRefs, processSpec, extractTags, extractServerBasePath } from "../src/spec.js";
 import { emptyExecuteStats } from "../src/types.js";
 
+interface ResolvedSchema {
+  type?: string;
+  $ref?: string;
+  $circular?: string;
+  $reason?: string;
+  properties?: Record<string, ResolvedSchema>;
+}
+
+interface ProcessedOperation {
+  responses?: Record<string, {
+    content?: Record<string, { schema?: ResolvedSchema }>;
+  }>;
+}
+
+function responseSchema(processed: Record<string, unknown>, path: string): ResolvedSchema {
+  const paths = processed.paths as Record<string, { get?: ProcessedOperation }>;
+  return paths[path]!.get!.responses!["200"]!.content!["application/json"]!.schema!;
+}
+
 describe("resolveRefs", () => {
   it("resolves simple $ref", () => {
     const spec = {
@@ -271,9 +290,9 @@ describe("processSpec", () => {
       },
     };
 
-    const paths = processSpec(spec).paths as any;
-    const petsSchema = paths["/pets"].get.responses["200"].content["application/json"].schema;
-    const featuredPetSchema = paths["/featured-pet"].get.responses["200"].content["application/json"].schema;
+    const processed = processSpec(spec);
+    const petsSchema = responseSchema(processed, "/pets");
+    const featuredPetSchema = responseSchema(processed, "/featured-pet");
 
     expect(petsSchema.properties.name.type).toBe("string");
     expect(featuredPetSchema.properties.name.type).toBe("string");
@@ -320,9 +339,9 @@ describe("processSpec", () => {
       },
     };
 
-    const paths = processSpec(spec).paths as any;
-    const parentSchema = paths["/parent"].get.responses["200"].content["application/json"].schema;
-    const childSchema = paths["/child"].get.responses["200"].content["application/json"].schema;
+    const processed = processSpec(spec);
+    const parentSchema = responseSchema(processed, "/parent");
+    const childSchema = responseSchema(processed, "/child");
 
     expect(parentSchema.properties.parentName.type).toBe("string");
     expect(parentSchema.properties.child.properties.childAge.type).toBe("integer");
@@ -360,9 +379,9 @@ describe("processSpec", () => {
       },
     };
 
-    const paths = processSpec(spec, 2).paths as any;
-    const aSchema = paths["/a"].get.responses["200"].content["application/json"].schema;
-    const cSchema = paths["/c"].get.responses["200"].content["application/json"].schema;
+    const processed = processSpec(spec, 2);
+    const aSchema = responseSchema(processed, "/a");
+    const cSchema = responseSchema(processed, "/c");
 
     expect(aSchema.properties.b.type).toBe("string");
     expect(cSchema.properties.a.properties.b).toEqual({
