@@ -7,15 +7,20 @@ interface PendingNode {
   path: string;
 }
 
-export function findFunctionPath(value: unknown, path = "input"): string | null {
+type DataOnlyViolation =
+  | { kind: "function"; path: string }
+  | { kind: "accessor"; path: string }
+  | { kind: "graph-too-large"; path: string };
+
+function findDataOnlyViolation(value: unknown, path = "input"): DataOnlyViolation | null {
   const seen = new WeakSet<object>();
   const pending: PendingNode[] = [{ value, path }];
   let checked = 0;
   let queued = 1;
 
-  function checkBudget(nextPath: string): string | null {
+  function checkBudget(nextPath: string): DataOnlyViolation | null {
     checked += 1;
-    return checked > MAX_GUARD_NODES ? `${nextPath} (object graph too large)` : null;
+    return checked > MAX_GUARD_NODES ? { kind: "graph-too-large", path: nextPath } : null;
   }
 
   while (pending.length > 0) {
@@ -24,7 +29,7 @@ export function findFunctionPath(value: unknown, path = "input"): string | null 
 
     const budgetError = checkBudget(current.path);
     if (budgetError) return budgetError;
-    if (typeof current.value === "function") return current.path;
+    if (typeof current.value === "function") return { kind: "function", path: current.path };
     if (current.value === null || typeof current.value !== "object") continue;
     if (seen.has(current.value)) continue;
     seen.add(current.value);
@@ -40,11 +45,11 @@ export function findFunctionPath(value: unknown, path = "input"): string | null 
           ? `${current.path}[${key}]`
           : `${current.path}.${key}`;
       if (!("value" in descriptor)) {
-        return `${childPath} (accessor property is not data-only)`;
+        return { kind: "accessor", path: childPath };
       }
       queued += 1;
       if (queued > MAX_GUARD_NODES) {
-        return `${childPath} (object graph too large)`;
+        return { kind: "graph-too-large", path: childPath };
       }
       pending.push({
         value: descriptor.value,
@@ -56,20 +61,45 @@ export function findFunctionPath(value: unknown, path = "input"): string | null 
   return null;
 }
 
+export function findFunctionPath(value: unknown, path = "input"): string | null {
+  const violation = findDataOnlyViolation(value, path);
+  if (!violation) return null;
+
+  switch (violation.kind) {
+    case "function":
+      return violation.path;
+    case "accessor":
+      return `${violation.path} (accessor property is not data-only)`;
+    case "graph-too-large":
+      return `${violation.path} (object graph too large)`;
+  }
+}
+
 export function dataOnlyFunctionError(functionPath: string): string {
   return `data-only execution does not accept function values at ${functionPath}`;
+}
+
+function dataOnlyViolationError(violation: DataOnlyViolation): string {
+  switch (violation.kind) {
+    case "function":
+      return dataOnlyFunctionError(violation.path);
+    case "accessor":
+      return `data-only execution does not accept accessor properties at ${violation.path}`;
+    case "graph-too-large":
+      return `data-only execution input graph exceeds ${MAX_GUARD_NODES} nodes at ${violation.path}`;
+  }
 }
 
 export function rejectDataOnlyFunctions(
   input: Record<string, unknown>,
   stats: ExecuteStats,
 ): ExecuteResult | null {
-  const functionPath = findFunctionPath(input);
-  if (!functionPath) return null;
+  const violation = findDataOnlyViolation(input);
+  if (!violation) return null;
 
   return {
     result: undefined,
-    error: dataOnlyFunctionError(functionPath),
+    error: dataOnlyViolationError(violation),
     stats,
   };
 }
