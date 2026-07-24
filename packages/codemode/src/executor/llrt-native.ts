@@ -11,7 +11,11 @@ import type {
   ExecuteStats,
   SandboxOptions,
 } from "../types.js";
-import { rejectDataOnlyFunctions } from "./data-only.js";
+import {
+  dataOnlyViolationError,
+  findDataOnlyTransportViolation,
+  rejectDataOnlyTransport,
+} from "./data-only.js";
 
 /**
  * Experimental in-process LLRT executor backed by `@robinbraemer/llrt`.
@@ -42,7 +46,25 @@ export class LlrtNativeExecutor implements CapabilityExecutor {
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
+    return await this.executeGuarded(code, globals, true);
+  }
+
+  private async executeGuarded(
+    code: string,
+    globals: Record<string, unknown>,
+    allowFunctions: boolean,
+  ): Promise<ExecuteResult> {
     const start = Date.now();
+    const violation = findDataOnlyTransportViolation(globals, "input", {
+      allowFunctions,
+    });
+    if (violation) {
+      return {
+        result: undefined,
+        error: dataOnlyViolationError(violation),
+        stats: emptyStats(Date.now() - start, this.memoryMB),
+      };
+    }
 
     try {
       const { LlrtRuntime } = await import("@robinbraemer/llrt");
@@ -99,10 +121,7 @@ export class LlrtNativeExecutor implements CapabilityExecutor {
     code: string,
     input: Record<string, unknown>,
   ): Promise<ExecuteResult> {
-    const rejection = rejectDataOnlyFunctions(input, emptyStats(0, this.memoryMB));
-    if (rejection) return rejection;
-
-    return await this.execute(code, input);
+    return await this.executeGuarded(code, input, false);
   }
 
   async executeWithCapabilities(
@@ -110,7 +129,7 @@ export class LlrtNativeExecutor implements CapabilityExecutor {
     input: Record<string, unknown>,
     capabilities: CapabilityManifest,
   ): Promise<ExecuteResult> {
-    const rejection = rejectDataOnlyFunctions(input, emptyStats(0, this.memoryMB));
+    const rejection = rejectDataOnlyTransport(input, emptyStats(0, this.memoryMB));
     if (rejection) return rejection;
     const collision = capabilityNamespaceCollision(input, capabilities);
     if (collision) {

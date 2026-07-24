@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rejectDataOnlyFunctions } from "../src/executor/data-only.js";
+import { rejectDataOnlyTransport } from "../src/executor/data-only.js";
 import { resolveRefs, processSpec, extractTags, extractServerBasePath } from "../src/spec.js";
 import { emptyExecuteStats } from "../src/types.js";
 
@@ -390,7 +390,7 @@ describe("processSpec", () => {
     });
   });
 
-  it("keeps high-reuse processed specs below the data-only graph guard", () => {
+  it("keeps the 4.37 MB production-scale alias graph within transport budgets", () => {
     const properties = Object.fromEntries(
       Array.from({ length: 500 }, (_, index) => [`field${index}`, { type: "string" }]),
     );
@@ -416,8 +416,10 @@ describe("processSpec", () => {
     };
 
     const processed = processSpec(spec);
+    const encodedBytes = Buffer.byteLength(JSON.stringify({ spec: processed }));
 
-    expect(rejectDataOnlyFunctions({ spec: processed }, emptyExecuteStats())).toBeNull();
+    expect(encodedBytes).toBe(4_354_110);
+    expect(rejectDataOnlyTransport({ spec: processed }, emptyExecuteStats())).toBeNull();
   });
 });
 

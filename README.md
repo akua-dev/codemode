@@ -138,6 +138,14 @@ Each tool call gets a fresh sandbox with no state carried over between calls.
 
 Successful spec preprocessing is cached. Concurrent searches share an in-flight async spec provider, while a failed preparation is retried by a later search.
 
+Data-only input first has a 100,000-node structural inspection limit. Built-in
+executors additionally reject cycles, `bigint`, and custom `toJSON` hooks, then
+preflight the fully expanded transport shape before marshalling it into a
+sandbox. Shared aliases count once per transport occurrence, with limits of
+500,000 expanded occurrences and 10 MiB of encoded input. Custom executors still
+receive the alias-preserving structured clone and remain responsible for their
+own transport limits.
+
 #### `SandboxOptions`
 
 | Option | Type | Default | Description |

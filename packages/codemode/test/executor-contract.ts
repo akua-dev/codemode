@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import type { CapabilityExecutor, Executor, SandboxOptions } from "../src/types.js";
 import { CodeMode } from "../src/codemode.js";
+import {
+  createCyclicTransportInput,
+  createCustomToJSONTransportInput,
+  createDepth18TransportFanOut,
+} from "./transport-fixtures.js";
 
 /**
  * Factory that constructs an executor for a given set of sandbox options.
@@ -108,6 +113,79 @@ export function executorContract(
 
       expect(result.result).toBeUndefined();
       expect(result.error).toContain("input.api.request");
+    });
+
+    it("rejects alias fan-out before transport marshalling", async () => {
+      const executor = factory();
+      const result = await executor.executeData(
+        `async () => 1`,
+        createDepth18TransportFanOut(),
+      );
+
+      expect(result.result).toBeUndefined();
+      expect(result.error).toMatch(
+        /^data-only execution encoded input exceeds 10485760 bytes at input\.spec/,
+      );
+    });
+
+    it("rejects true cycles before transport marshalling", async () => {
+      const executor = factory();
+      const result = await executor.executeData(
+        `async () => 1`,
+        createCyclicTransportInput(),
+      );
+
+      expect(result.result).toBeUndefined();
+      expect(result.error).toBe(
+        "data-only execution does not accept cyclic object graphs at input.value.self",
+      );
+    });
+
+    it("rejects custom JSON serialization before invoking it", async () => {
+      const executor = factory();
+      const result = await executor.executeData(
+        `async () => 1`,
+        createCustomToJSONTransportInput(),
+      );
+
+      expect(result.result).toBeUndefined();
+      expect(result.error).toBe(
+        "data-only execution does not accept custom toJSON serialization at input.value.toJSON",
+      );
+    });
+
+    it("runs one full preflight for rejected data-only input", async () => {
+      let structuralScans = 0;
+      const value = new Proxy(createCustomToJSONTransportInput().value!, {
+        ownKeys(target) {
+          structuralScans += 1;
+          return Reflect.ownKeys(target);
+        },
+      });
+      const executor = factory();
+
+      const result = await executor.executeData(
+        `async () => 1`,
+        { value },
+      );
+
+      expect(result.error).toBe(
+        "data-only execution does not accept custom toJSON serialization at input.value.toJSON",
+      );
+      expect(structuralScans).toBe(1);
+    });
+
+    it("rejects bigint values consistently across transports", async () => {
+      const executor = factory();
+      const result = await executor.executeData(
+        `async () => 1`,
+        { value: 1n },
+      );
+
+      expect(result.result).toBeUndefined();
+      expect(result.error).toBe(
+        "data-only execution does not accept bigint values at input.value",
+      );
     });
 
     if (supportsHostFunctions) {
