@@ -106,7 +106,7 @@ AI Agent
 CodeMode MCP Server
   │
   ├─ search(code) → runs JS with preprocessed OpenAPI spec
-  │   → all $refs resolved inline, only essential fields kept
+  │   → ref-resolved paths view with only essential fields kept
   │   → agent discovers endpoints, schemas, parameters
   │
   └─ execute(code) → runs JS with injected request client
@@ -135,6 +135,16 @@ Each tool call gets a fresh sandbox with no state carried over between calls.
 | `maxResponseBytes` | `number` | `10485760` | Max response body size in bytes (10MB) |
 | `allowedHeaders` | `string[]` | `undefined` | Header whitelist. When unset, a blocklist strips `Authorization`, `Cookie`, `Host`, `X-Forwarded-*`, `Proxy-*`. |
 | `maxRefDepth` | `number` | `50` | Max `$ref` resolution depth |
+
+Successful spec preprocessing is cached. Concurrent searches share an in-flight async spec provider, while a failed preparation is retried by a later search.
+
+Data-only input first has a 100,000-node structural inspection limit. Built-in
+executors additionally reject cycles, `bigint`, and custom `toJSON` hooks, then
+preflight the fully expanded transport shape before marshalling it into a
+sandbox. Shared aliases count once per transport occurrence, with limits of
+500,000 expanded occurrences and 10 MiB of encoded input. Custom executors still
+receive the alias-preserving structured clone and remain responsible for their
+own transport limits.
 
 #### `SandboxOptions`
 
@@ -174,7 +184,7 @@ Clean up sandbox resources.
 
 ### Inside `search`
 
-The `spec` global is the preprocessed OpenAPI spec with all `$ref` pointers resolved inline:
+The `spec` global is the preprocessed OpenAPI paths view; resolvable `$ref` pointers are expanded inline:
 
 ```javascript
 // Find endpoints by tag
@@ -190,16 +200,14 @@ async () => {
   return results;
 }
 
-// Get endpoint with requestBody schema (refs are already resolved)
+// Get endpoint with requestBody schema (resolvable refs are expanded)
 async () => {
   const op = spec.paths['/v1/products']?.post;
   return { summary: op?.summary, requestBody: op?.requestBody };
 }
 
-// Spec metadata
+// Spec shape
 async () => ({
-  title: spec.info.title,
-  version: spec.info.version,
   endpoints: Object.keys(spec.paths).length,
 })
 ```
@@ -257,9 +265,9 @@ async () => {
 
 CodeMode automatically preprocesses your OpenAPI spec before passing it to the search sandbox:
 
-- **`$ref` resolution** — all `$ref` pointers are resolved inline (circular refs become `{ $circular: ref }`)
-- **Field extraction** — only essential fields kept per operation: `summary`, `description`, `tags`, `operationId`, `parameters`, `requestBody`, `responses`
-- **Metadata preserved** — `info`, `servers`, and `components.schemas` are kept alongside processed paths
+- **`$ref` resolution** — resolvable `$ref` pointers are expanded inline; circular refs become `{ $circular: ref }`, and refs beyond `maxRefDepth` become `{ $circular: ref, $reason: "max depth exceeded" }`
+- **Field extraction** — only essential fields kept per operation: `summary`, `description`, `tags`, `parameters`, `requestBody`, `responses`
+- **Output shape** — only `{ paths }` is passed to search; `info`, `servers`, and `components` are omitted because operation fields and resolved references are represented in the paths view
 
 You can also use the preprocessing utilities directly:
 
@@ -315,17 +323,37 @@ const codemode = new CodeMode({
 
 Implement the `Executor` interface to use your own sandbox:
 
+CodeMode passes a fresh structured clone of the processed spec to each `search()` call, so mutations made by a custom executor cannot change later searches.
+
+CodeMode calls `executeData()` for `search()` and `executeWithCapabilities()` for `execute()`. Implement the latter when the custom runtime needs to expose the request capability; the legacy `execute()` method remains available for direct executor use.
+
 ```typescript
-import { CodeMode, type Executor, type ExecuteResult } from '@robinbraemer/codemode';
+import {
+  CodeMode,
+  emptyExecuteStats,
+  type CapabilityManifest,
+  type ExecuteResult,
+  type Executor,
+} from '@robinbraemer/codemode';
 
 class MyExecutor implements Executor {
-  async execute(code: string, globals: Record<string, unknown>): Promise<ExecuteResult> {
-    // `code` is an async arrow function as a string: "async () => { ... }"
-    // `globals` contains named values to inject:
-    //   - plain data (objects, arrays, primitives) → read-only values
-    //   - functions → callable host functions
-    //   - objects with function values → namespace with callable methods
-    return { result: ..., logs: [] };
+  async executeData(_code: string, _input: Record<string, unknown>): Promise<ExecuteResult> {
+    // Run data-only code in the sandbox.
+    return { result: undefined, stats: emptyExecuteStats() };
+  }
+
+  async executeWithCapabilities(
+    _code: string,
+    _input: Record<string, unknown>,
+    _capabilities: CapabilityManifest,
+  ): Promise<ExecuteResult> {
+    // Run code with declared capabilities, such as `{namespace}.request()`.
+    return { result: undefined, stats: emptyExecuteStats() };
+  }
+
+  async execute(_code: string, _globals: Record<string, unknown>): Promise<ExecuteResult> {
+    // Legacy direct-executor entrypoint.
+    return { result: undefined, stats: emptyExecuteStats() };
   }
 
   dispose() { /* clean up */ }

@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { LlrtProcessExecutor } from "../src/executor/llrt-process.js";
+import {
+  createCyclicTransportInput,
+  createCustomToJSONTransportInput,
+  createDepth18TransportFanOut,
+} from "./transport-fixtures.js";
 
 async function createFakeLlrtBinary(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "codemode-llrt-"));
@@ -67,6 +72,62 @@ describe("LlrtProcessExecutor", () => {
 
     expect(result.error).toBeUndefined();
     expect(result.result).toBe("API");
+  });
+
+  it("rejects alias fan-out before transport marshalling", async () => {
+    const executor = new LlrtProcessExecutor({ binaryPath: await createFakeLlrtBinary() });
+
+    const result = await executor.executeData(
+      `async () => 1`,
+      createDepth18TransportFanOut(),
+    );
+
+    expect(result.result).toBeUndefined();
+    expect(result.error).toMatch(
+      /^data-only execution encoded input exceeds 10485760 bytes at input\.spec/,
+    );
+  });
+
+  it("rejects true cycles before transport marshalling", async () => {
+    const executor = new LlrtProcessExecutor({ binaryPath: await createFakeLlrtBinary() });
+
+    const result = await executor.executeData(
+      `async () => 1`,
+      createCyclicTransportInput(),
+    );
+
+    expect(result.result).toBeUndefined();
+    expect(result.error).toBe(
+      "data-only execution does not accept cyclic object graphs at input.value.self",
+    );
+  });
+
+  it("rejects custom JSON serialization before invoking it", async () => {
+    const executor = new LlrtProcessExecutor({ binaryPath: await createFakeLlrtBinary() });
+
+    const result = await executor.executeData(
+      `async () => 1`,
+      createCustomToJSONTransportInput(),
+    );
+
+    expect(result.result).toBeUndefined();
+    expect(result.error).toBe(
+      "data-only execution does not accept custom toJSON serialization at input.value.toJSON",
+    );
+  });
+
+  it("rejects bigint values consistently across transports", async () => {
+    const executor = new LlrtProcessExecutor({ binaryPath: await createFakeLlrtBinary() });
+
+    const result = await executor.executeData(
+      `async () => 1`,
+      { value: 1n },
+    );
+
+    expect(result.result).toBeUndefined();
+    expect(result.error).toBe(
+      "data-only execution does not accept bigint values at input.value",
+    );
   });
 
   it("enforces wall-clock timeout for a stuck process", async () => {

@@ -30,7 +30,7 @@ export function createSearchToolDefinition(
   const parts: string[] = [];
 
   parts.push(
-    `Search the API specification to discover available endpoints. All $refs are pre-resolved inline.`,
+    `Search the API specification to discover available endpoints. Resolvable $refs are expanded inline; circular and max-depth refs remain marked.`,
   );
 
   if (context?.tags && context.tags.length > 0) {
@@ -80,7 +80,7 @@ Examples:
 
 ${discoverExample}
 
-// Get endpoint with requestBody schema (refs are resolved)
+// Get endpoint with requestBody schema (resolvable refs are expanded)
 async () => {
   const op = spec.paths['/example']?.post;
   return { summary: op?.summary, requestBody: op?.requestBody };

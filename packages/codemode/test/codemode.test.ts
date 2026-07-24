@@ -74,6 +74,45 @@ class TestExecutor implements Executor {
   }
 }
 
+type SearchSchema = {
+  type?: string;
+  properties?: Record<string, SearchSchema>;
+};
+
+function responseSchema(input: Record<string, unknown>, path: string): SearchSchema {
+  const spec = input.spec as {
+    paths: Record<string, {
+      get: {
+        responses: Record<string, {
+          content: Record<string, { schema: SearchSchema }>;
+        }>;
+      };
+    }>;
+  };
+  return spec.paths[path]!.get.responses["200"]!.content["application/json"]!.schema;
+}
+
+class MutatingSearchExecutor extends TestExecutor {
+  observations: Array<{ schemasAreShared: boolean; nameType: string | undefined }> = [];
+
+  override async executeData(
+    _code: string,
+    input: Record<string, unknown>,
+  ): Promise<ExecuteResult> {
+    this.dataCalls += 1;
+    const petsSchema = responseSchema(input, "/pets");
+    const featuredPetsSchema = responseSchema(input, "/featured-pets");
+
+    this.observations.push({
+      schemasAreShared: petsSchema === featuredPetsSchema,
+      nameType: petsSchema.properties?.name?.type,
+    });
+    petsSchema.properties!.name!.type = "mutated";
+
+    return { result: null };
+  }
+}
+
 const testSpec = {
   openapi: "3.0.0",
   info: { title: "Test API", version: "1.0.0" },
@@ -271,6 +310,70 @@ describe("CodeMode", () => {
       expect(executor.calls).toBe(0);
     });
 
+    it("isolates cached specs from custom data executor mutations", async () => {
+      const executor = new MutatingSearchExecutor();
+      const cm = new CodeMode({
+        spec: {
+          components: {
+            schemas: {
+              Pet: { type: "object", properties: { name: { type: "string" } } },
+            },
+          },
+          paths: {
+            "/pets": {
+              get: {
+                responses: {
+                  "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+                },
+              },
+            },
+            "/featured-pets": {
+              get: {
+                responses: {
+                  "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+                },
+              },
+            },
+          },
+        },
+        request: testHandler,
+        executor,
+      });
+
+      await cm.search("async () => null");
+      await cm.search("async () => null");
+
+      expect(executor.observations).toEqual([
+        { schemasAreShared: true, nameType: "string" },
+        { schemasAreShared: true, nameType: "string" },
+      ]);
+    });
+
+    it("reports data-only spec violations before cloning the search input", async () => {
+      const cm = new CodeMode({
+        spec: {
+          paths: {
+            "/invalid": {
+              get: {
+                responses: {
+                  "200": { description: () => "not data-only" },
+                },
+              },
+            },
+          },
+        },
+        request: testHandler,
+        executor: new TestExecutor(),
+      });
+
+      const result = await cm.search("async () => 1");
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toBe(
+        "Error: data-only execution does not accept function values at input.spec.paths./invalid.get.responses.200.description",
+      );
+    });
+
     it("supports spec as async getter", async () => {
       const cm = new CodeMode({
         spec: async () => testSpec,
@@ -283,6 +386,63 @@ describe("CodeMode", () => {
       `);
       const paths = JSON.parse(result.content[0]!.text);
       expect(paths).toContain("/v1/clusters");
+    });
+
+    it("shares an in-flight async spec provider across concurrent searches", async () => {
+      let resolveSpec: (spec: typeof testSpec) => void;
+      const pendingSpec = new Promise<typeof testSpec>((resolve) => {
+        resolveSpec = resolve;
+      });
+      let providerCalls = 0;
+      const executor = new TestExecutor();
+      const cm = new CodeMode({
+        spec: async () => {
+          providerCalls += 1;
+          return await pendingSpec;
+        },
+        request: testHandler,
+        executor,
+      });
+
+      const firstSearch = cm.search("async () => Object.keys(spec.paths)");
+      const secondSearch = cm.search("async () => Object.keys(spec.paths)");
+
+      await Promise.resolve();
+      expect(providerCalls).toBe(1);
+
+      resolveSpec!(testSpec);
+      const [firstResult, secondResult] = await Promise.all([
+        firstSearch,
+        secondSearch,
+      ]);
+
+      expect(firstResult.isError).toBeUndefined();
+      expect(secondResult.isError).toBeUndefined();
+      expect(executor.dataCalls).toBe(2);
+    });
+
+    it("retries the async spec provider after a failed search", async () => {
+      let providerCalls = 0;
+      const executor = new TestExecutor();
+      const cm = new CodeMode({
+        spec: async () => {
+          providerCalls += 1;
+          if (providerCalls === 1) throw new Error("spec unavailable");
+          return testSpec;
+        },
+        request: testHandler,
+        executor,
+      });
+
+      await expect(cm.search("async () => Object.keys(spec.paths)")).rejects.toThrow(
+        "spec unavailable",
+      );
+
+      const result = await cm.search("async () => Object.keys(spec.paths)");
+
+      expect(result.isError).toBeUndefined();
+      expect(providerCalls).toBe(2);
+      expect(executor.dataCalls).toBe(1);
     });
   });
 

@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
+import { rejectDataOnlyTransport } from "../src/executor/data-only.js";
 import { resolveRefs, processSpec, extractTags, extractServerBasePath } from "../src/spec.js";
+import { emptyExecuteStats } from "../src/types.js";
+
+interface ResolvedSchema {
+  type?: string;
+  $ref?: string;
+  $circular?: string;
+  $reason?: string;
+  properties?: Record<string, ResolvedSchema>;
+}
+
+interface ProcessedOperation {
+  responses?: Record<string, {
+    content?: Record<string, { schema?: ResolvedSchema }>;
+  }>;
+}
+
+function responseSchema(processed: Record<string, unknown>, path: string): ResolvedSchema {
+  const paths = processed.paths as Record<string, { get?: ProcessedOperation }>;
+  return paths[path]!.get!.responses!["200"]!.content!["application/json"]!.schema!;
+}
 
 describe("resolveRefs", () => {
   it("resolves simple $ref", () => {
@@ -242,6 +263,163 @@ describe("processSpec", () => {
     expect(test.get).toBeDefined();
     expect(test.parameters).toBeUndefined();
     expect(test.description).toBeUndefined();
+  });
+
+  it("shares acyclic component expansions across operations", () => {
+    const spec = {
+      components: {
+        schemas: {
+          Pet: { type: "object", properties: { name: { type: "string" } } },
+        },
+      },
+      paths: {
+        "/pets": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+            },
+          },
+        },
+        "/featured-pet": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Pet" } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const processed = processSpec(spec);
+    const petsSchema = responseSchema(processed, "/pets");
+    const featuredPetSchema = responseSchema(processed, "/featured-pet");
+
+    expect(petsSchema.properties.name.type).toBe("string");
+    expect(featuredPetSchema.properties.name.type).toBe("string");
+    expect(petsSchema.$ref).toBeUndefined();
+    expect(featuredPetSchema.$ref).toBeUndefined();
+    expect(featuredPetSchema).toBe(petsSchema);
+  });
+
+  it("resolves mutually recursive component roots in each endpoint context", () => {
+    const spec = {
+      components: {
+        schemas: {
+          Parent: {
+            type: "object",
+            properties: {
+              parentName: { type: "string" },
+              child: { $ref: "#/components/schemas/Child" },
+            },
+          },
+          Child: {
+            type: "object",
+            properties: {
+              childAge: { type: "integer" },
+              parent: { $ref: "#/components/schemas/Parent" },
+            },
+          },
+        },
+      },
+      paths: {
+        "/parent": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Parent" } } } },
+            },
+          },
+        },
+        "/child": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Child" } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const processed = processSpec(spec);
+    const parentSchema = responseSchema(processed, "/parent");
+    const childSchema = responseSchema(processed, "/child");
+
+    expect(parentSchema.properties.parentName.type).toBe("string");
+    expect(parentSchema.properties.child.properties.childAge.type).toBe("integer");
+    expect(parentSchema.properties.child.properties.parent).toEqual({ $circular: "#/components/schemas/Parent" });
+
+    expect(childSchema.properties.childAge.type).toBe("integer");
+    expect(childSchema.properties.parent.properties.parentName.type).toBe("string");
+    expect(childSchema.properties.parent.properties.child).toEqual({ $circular: "#/components/schemas/Child" });
+  });
+
+  it("keeps max-depth sentinels when a shallower endpoint has cached a ref", () => {
+    const spec = {
+      components: {
+        schemas: {
+          A: { type: "object", properties: { b: { $ref: "#/components/schemas/B" } } },
+          B: { type: "string" },
+          C: { type: "object", properties: { a: { $ref: "#/components/schemas/A" } } },
+        },
+      },
+      paths: {
+        "/a": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/A" } } } },
+            },
+          },
+        },
+        "/c": {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/C" } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const processed = processSpec(spec, 2);
+    const aSchema = responseSchema(processed, "/a");
+    const cSchema = responseSchema(processed, "/c");
+
+    expect(aSchema.properties.b.type).toBe("string");
+    expect(cSchema.properties.a.properties.b).toEqual({
+      $circular: "#/components/schemas/B",
+      $reason: "max depth exceeded",
+    });
+  });
+
+  it("keeps the 4.37 MB production-scale alias graph within transport budgets", () => {
+    const properties = Object.fromEntries(
+      Array.from({ length: 500 }, (_, index) => [`field${index}`, { type: "string" }]),
+    );
+    const paths = Object.fromEntries(
+      Array.from({ length: 300 }, (_, index) => [
+        `/resources/${index}`,
+        {
+          get: {
+            responses: {
+              "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Resource" } } } },
+            },
+          },
+        },
+      ]),
+    );
+    const spec = {
+      components: {
+        schemas: {
+          Resource: { type: "object", properties },
+        },
+      },
+      paths,
+    };
+
+    const processed = processSpec(spec);
+    const encodedBytes = Buffer.byteLength(JSON.stringify({ spec: processed }));
+
+    expect(encodedBytes).toBe(4_354_110);
+    expect(rejectDataOnlyTransport({ spec: processed }, emptyExecuteStats())).toBeNull();
   });
 });
 

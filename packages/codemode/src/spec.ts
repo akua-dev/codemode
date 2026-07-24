@@ -7,13 +7,94 @@ const DEFAULT_MAX_REF_DEPTH = 50;
 /** Keys that must never be traversed or copied during $ref resolution. */
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
+interface ResolutionResult {
+  value: unknown;
+  contextDependent: boolean;
+}
+
+function resolveRefsWithContext(
+  obj: unknown,
+  root: Record<string, unknown>,
+  seen: Set<string>,
+  maxDepth: number,
+  cache: Map<string, unknown>,
+): ResolutionResult {
+  if (obj === null || obj === undefined) {
+    return { value: obj, contextDependent: false };
+  }
+  if (typeof obj !== "object") return { value: obj, contextDependent: false };
+
+  if (Array.isArray(obj)) {
+    const items = obj.map((item) =>
+      resolveRefsWithContext(item, root, seen, maxDepth, cache),
+    );
+    return {
+      value: items.map(({ value }) => value),
+      contextDependent: items.some(({ contextDependent }) => contextDependent),
+    };
+  }
+
+  const record = obj as Record<string, unknown>;
+
+  if ("$ref" in record && typeof record.$ref === "string") {
+    const ref = record.$ref;
+
+    // Circular: this $ref is already in the current ancestor chain
+    if (seen.has(ref)) {
+      return { value: { $circular: ref }, contextDependent: true };
+    }
+
+    // Depth limit
+    if (seen.size >= maxDepth) {
+      return {
+        value: { $circular: ref, $reason: "max depth exceeded" },
+        contextDependent: true,
+      };
+    }
+
+    // A finite expansion is reusable only with the same remaining depth budget.
+    const cacheKey = JSON.stringify([maxDepth - seen.size, ref]);
+    if (cache.has(cacheKey)) {
+      return { value: cache.get(cacheKey), contextDependent: false };
+    }
+
+    const parts = ref.replace("#/", "").split("/");
+    let resolved: unknown = root;
+    for (const part of parts) {
+      if (DANGEROUS_KEYS.has(part)) {
+        return { value: { $ref: ref, $error: "unsafe ref path" }, contextDependent: false };
+      }
+      resolved = (resolved as Record<string, unknown>)?.[part];
+    }
+
+    // Clone seen for this branch so siblings don't share state
+    const branchSeen = new Set(seen);
+    branchSeen.add(ref);
+
+    const result = resolveRefsWithContext(resolved, root, branchSeen, maxDepth, cache);
+    if (!result.contextDependent) cache.set(cacheKey, result.value);
+    return result;
+  }
+
+  const result: Record<string, unknown> = {};
+  let contextDependent = false;
+  for (const [key, value] of Object.entries(record)) {
+    if (DANGEROUS_KEYS.has(key)) continue;
+    const resolved = resolveRefsWithContext(value, root, seen, maxDepth, cache);
+    result[key] = resolved.value;
+    contextDependent ||= resolved.contextDependent;
+  }
+  return { value: result, contextDependent };
+}
+
 /**
- * Recursively resolve all `$ref` pointers in an OpenAPI spec inline.
- * Circular references are replaced with `{ $circular: ref }`.
+ * Recursively resolve resolvable `$ref` pointers in an OpenAPI spec inline.
+ * Circular references and refs beyond the depth limit are replaced with
+ * markers describing why expansion stopped.
  *
  * The `seen` set tracks the current ancestor chain only (not globally),
  * so the same $ref used in sibling positions resolves correctly.
- * A memoization cache avoids re-resolving the same $ref multiple times.
+ * A memoization cache avoids re-resolving context-independent $refs.
  *
  * @param maxDepth - Maximum $ref resolution depth (default: 50)
  */
@@ -24,49 +105,7 @@ export function resolveRefs(
   maxDepth = DEFAULT_MAX_REF_DEPTH,
   _cache = new Map<string, unknown>(),
 ): unknown {
-  if (obj === null || obj === undefined) return obj;
-  if (typeof obj !== "object") return obj;
-  if (Array.isArray(obj))
-    return obj.map((item) => resolveRefs(item, root, seen, maxDepth, _cache));
-
-  const record = obj as Record<string, unknown>;
-
-  if ("$ref" in record && typeof record.$ref === "string") {
-    const ref = record.$ref;
-
-    // Circular: this $ref is already in the current ancestor chain
-    if (seen.has(ref)) return { $circular: ref };
-
-    // Depth limit
-    if (seen.size >= maxDepth) {
-      return { $circular: ref, $reason: "max depth exceeded" };
-    }
-
-    // Memoization: return cached result if available
-    if (_cache.has(ref)) return _cache.get(ref);
-
-    const parts = ref.replace("#/", "").split("/");
-    let resolved: unknown = root;
-    for (const part of parts) {
-      if (DANGEROUS_KEYS.has(part)) return { $ref: ref, $error: "unsafe ref path" };
-      resolved = (resolved as Record<string, unknown>)?.[part];
-    }
-
-    // Clone seen for this branch so siblings don't share state
-    const branchSeen = new Set(seen);
-    branchSeen.add(ref);
-
-    const result = resolveRefs(resolved, root, branchSeen, maxDepth, _cache);
-    _cache.set(ref, result);
-    return result;
-  }
-
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (DANGEROUS_KEYS.has(key)) continue;
-    result[key] = resolveRefs(value, root, seen, maxDepth, _cache);
-  }
-  return result;
+  return resolveRefsWithContext(obj, root, seen, maxDepth, _cache).value;
 }
 
 interface OperationObject {
@@ -103,9 +142,10 @@ export function extractServerBasePath(spec: OpenAPISpec): string {
 
 /**
  * Process an OpenAPI spec into a simplified format for the search tool.
- * Resolves all $refs inline and extracts only the fields needed for search.
+ * Resolves resolvable $refs inline and extracts only the fields needed for search.
  * Prepends the server base path to all path keys so they're directly usable.
- * Only paths are returned — info and components are omitted since refs are resolved inline.
+ * Only paths are returned — info and components are omitted because the search
+ * view contains the fields extracted from operations and their resolved refs.
  *
  * @param maxRefDepth - Maximum $ref resolution depth (default: 50)
  */
@@ -119,6 +159,7 @@ export function processSpec(
   >;
   const basePath = extractServerBasePath(spec);
   const paths: Record<string, Record<string, unknown>> = {};
+  const refCache = new Map<string, unknown>();
 
   for (const [path, pathItem] of Object.entries(rawPaths)) {
     if (!pathItem) continue;
@@ -137,25 +178,28 @@ export function processSpec(
             spec as Record<string, unknown>,
             undefined,
             maxRefDepth,
+            refCache,
           ),
           requestBody: resolveRefs(
             op.requestBody,
             spec as Record<string, unknown>,
             undefined,
             maxRefDepth,
+            refCache,
           ),
           responses: resolveRefs(
             op.responses,
             spec as Record<string, unknown>,
             undefined,
             maxRefDepth,
+            refCache,
           ),
         };
       }
     }
   }
 
-  // Only paths — info and components are omitted since all $refs are resolved inline.
+  // Only paths — info and components are omitted from the search view.
   return { paths };
 }
 

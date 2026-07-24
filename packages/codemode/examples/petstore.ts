@@ -87,9 +87,6 @@ function step(label: string, result: { content: { text: string }[]; isError?: bo
 step(
   "Search: API overview",
   await codemode.search(`async () => ({
-    title: spec.info.title,
-    version: spec.info.version,
-    servers: spec.servers,
     endpointCount: Object.keys(spec.paths).length,
     endpoints: Object.keys(spec.paths),
   })`),
@@ -100,7 +97,7 @@ step(
   "Search: Pet endpoints",
   await codemode.search(`async () => {
     return Object.entries(spec.paths)
-      .filter(([p]) => p.startsWith('/pet'))
+      .filter(([p]) => p.startsWith('/api/v3/pet'))
       .flatMap(([path, methods]) =>
         Object.entries(methods)
           .filter(([m]) => ['get','post','put','delete'].includes(m))
@@ -116,7 +113,10 @@ step(
 // 3. Search: Inspect Pet schema
 step(
   "Search: Pet schema",
-  await codemode.search(`async () => spec.components?.schemas?.Pet`),
+  await codemode.search(`async () => ({
+    getPet: spec.paths['/api/v3/pet/{petId}']?.get?.responses,
+    createPet: spec.paths['/api/v3/pet']?.post?.requestBody,
+  })`),
 );
 
 // 4. Execute: Find available pets

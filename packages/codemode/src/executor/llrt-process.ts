@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../types.js";
-import { rejectDataOnlyFunctions } from "./data-only.js";
+import { rejectDataOnlyTransport } from "./data-only.js";
 
 export interface LlrtProcessExecutorOptions extends SandboxOptions {
   binaryPath?: string;
@@ -75,7 +75,7 @@ export class LlrtProcessExecutor implements Executor {
     code: string,
     input: Record<string, unknown>,
   ): Promise<ExecuteResult> {
-    const rejection = rejectDataOnlyFunctions(input, captureStats(Date.now()));
+    const rejection = rejectDataOnlyTransport(input, captureStats(Date.now()));
     if (rejection) return rejection;
 
     return await this.executeProcess(code, input);

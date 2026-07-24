@@ -1,6 +1,9 @@
 import { DEFAULT_MAX_RESULT_BYTES } from "../limits.js";
 import type { Executor, ExecuteResult, ExecuteStats, SandboxOptions } from "../types.js";
-import { findFunctionPath, rejectDataOnlyFunctions } from "./data-only.js";
+import {
+  dataOnlyViolationError,
+  findDataOnlyTransportViolation,
+} from "./data-only.js";
 
 const UTF8_BYTE_LENGTH_SOURCE = `function(value) {
   let bytes = 0;
@@ -105,12 +108,23 @@ export class QuickJSExecutor implements Executor {
     code: string,
     globals: Record<string, unknown>,
   ): Promise<ExecuteResult> {
+    return await this.executeGuarded(code, globals, false);
+  }
+
+  private async executeGuarded(
+    code: string,
+    globals: Record<string, unknown>,
+    dataOnly: boolean,
+  ): Promise<ExecuteResult> {
     const start = Date.now();
-    if (hasHostFunctions(globals)) {
+    const violation = findDataOnlyTransportViolation(globals);
+    if (violation) {
       return {
         result: undefined,
         error:
-          "QuickJSExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution",
+          violation.kind === "function" && !dataOnly
+            ? "QuickJSExecutor does not support host functions; use LlrtNativeExecutor for request-capable execution"
+            : dataOnlyViolationError(violation),
         stats: emptyStats(start, this.memoryMB),
       };
     }
@@ -262,10 +276,7 @@ export class QuickJSExecutor implements Executor {
     code: string,
     input: Record<string, unknown>,
   ): Promise<ExecuteResult> {
-    const rejection = rejectDataOnlyFunctions(input, emptyStats(Date.now(), this.memoryMB));
-    if (rejection) return rejection;
-
-    return await this.execute(code, input);
+    return await this.executeGuarded(code, input, true);
   }
 }
 
@@ -502,10 +513,6 @@ function emptyStats(startMs: number, memoryMB: number): ExecuteStats {
     mallocedBytes: 0,
     peakMallocedBytes: 0,
   };
-}
-
-function hasHostFunctions(globals: Record<string, unknown>): boolean {
-  return findFunctionPath(globals) !== null;
 }
 
 /**

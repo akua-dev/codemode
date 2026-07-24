@@ -1,4 +1,8 @@
 import { createExecutor } from "./executor/auto.js";
+import {
+  dataOnlyViolationError,
+  findDataOnlyTransportViolation,
+} from "./executor/data-only.js";
 import { DEFAULT_MAX_CODE_BYTES } from "./limits.js";
 import {
   createRequestBridge,
@@ -91,6 +95,7 @@ export class CodeMode {
 
   // Cached processed spec & context for tool descriptions
   private processedSpec: Record<string, unknown> | null = null;
+  private processedSpecPromise: Promise<Record<string, unknown>> | null = null;
   private specContext: { tags: string[]; endpointCount: number } | null = null;
 
   constructor(options: CodeModeOptions) {
@@ -158,15 +163,24 @@ export class CodeMode {
   /**
    * Execute a search against the OpenAPI spec.
    * The code runs in a sandbox with `spec` available as a global.
-   * All $refs are pre-resolved inline.
+   * Resolvable $refs are expanded inline; circular and max-depth refs remain
+   * marked in the processed search view.
    */
   async search(code: string): Promise<ToolCallResult> {
     const sizeError = this.validateCodeSize(code);
     if (sizeError) return sizeError;
     const executor = await this.getExecutor();
     const spec = await this.getProcessedSpec();
+    const input = { spec };
+    const violation = findDataOnlyTransportViolation(input);
+    if (violation) {
+      return this.formatResult({
+        result: undefined,
+        error: dataOnlyViolationError(violation),
+      });
+    }
 
-    const result = await executor.executeData(code, { spec });
+    const result = await executor.executeData(code, { spec: structuredClone(spec) });
 
     return this.formatResult(result);
   }
@@ -227,21 +241,36 @@ export class CodeMode {
   }
 
   /**
-   * Get the processed spec (refs resolved, fields extracted).
+   * Get the processed spec (resolvable refs expanded, fields extracted).
    * Caches the result after first call.
    */
   private async getProcessedSpec(): Promise<Record<string, unknown>> {
     if (this.processedSpec) return this.processedSpec;
 
-    const raw = await this.resolveSpec();
-    this.processedSpec = processSpec(raw, this.options.maxRefDepth);
+    if (!this.processedSpecPromise) {
+      const processedSpecPromise = this.resolveSpec().then((raw) => {
+        const processedSpec = processSpec(raw, this.options.maxRefDepth);
 
-    // Extract context for tool descriptions
-    const tags = extractTags(raw);
-    const endpointCount = Object.keys(raw.paths ?? {}).length;
-    this.specContext = { tags, endpointCount };
+        // Extract context for tool descriptions
+        const tags = extractTags(raw);
+        const endpointCount = Object.keys(raw.paths ?? {}).length;
+        this.specContext = { tags, endpointCount };
+        this.processedSpec = processedSpec;
+        if (this.processedSpecPromise === processedSpecPromise) {
+          this.processedSpecPromise = null;
+        }
 
-    return this.processedSpec;
+        return processedSpec;
+      });
+      this.processedSpecPromise = processedSpecPromise;
+      void processedSpecPromise.catch(() => {
+        if (this.processedSpecPromise === processedSpecPromise) {
+          this.processedSpecPromise = null;
+        }
+      });
+    }
+
+    return this.processedSpecPromise;
   }
 
   private async getExecutor(): Promise<Executor> {
