@@ -106,7 +106,7 @@ AI Agent
 CodeMode MCP Server
   │
   ├─ search(code) → runs JS with preprocessed OpenAPI spec
-  │   → all $refs resolved inline, only essential fields kept
+  │   → ref-resolved paths view with only essential fields kept
   │   → agent discovers endpoints, schemas, parameters
   │
   └─ execute(code) → runs JS with injected request client
@@ -135,6 +135,8 @@ Each tool call gets a fresh sandbox with no state carried over between calls.
 | `maxResponseBytes` | `number` | `10485760` | Max response body size in bytes (10MB) |
 | `allowedHeaders` | `string[]` | `undefined` | Header whitelist. When unset, a blocklist strips `Authorization`, `Cookie`, `Host`, `X-Forwarded-*`, `Proxy-*`. |
 | `maxRefDepth` | `number` | `50` | Max `$ref` resolution depth |
+
+Successful spec preprocessing is cached. Concurrent searches share an in-flight async spec provider, while a failed preparation is retried by a later search.
 
 #### `SandboxOptions`
 
@@ -174,7 +176,7 @@ Clean up sandbox resources.
 
 ### Inside `search`
 
-The `spec` global is the preprocessed OpenAPI spec with all `$ref` pointers resolved inline:
+The `spec` global is the preprocessed OpenAPI paths view; resolvable `$ref` pointers are expanded inline:
 
 ```javascript
 // Find endpoints by tag
@@ -196,10 +198,8 @@ async () => {
   return { summary: op?.summary, requestBody: op?.requestBody };
 }
 
-// Spec metadata
+// Spec shape
 async () => ({
-  title: spec.info.title,
-  version: spec.info.version,
   endpoints: Object.keys(spec.paths).length,
 })
 ```
@@ -257,9 +257,9 @@ async () => {
 
 CodeMode automatically preprocesses your OpenAPI spec before passing it to the search sandbox:
 
-- **`$ref` resolution** — all `$ref` pointers are resolved inline (circular refs become `{ $circular: ref }`)
-- **Field extraction** — only essential fields kept per operation: `summary`, `description`, `tags`, `operationId`, `parameters`, `requestBody`, `responses`
-- **Metadata preserved** — `info`, `servers`, and `components.schemas` are kept alongside processed paths
+- **`$ref` resolution** — resolvable `$ref` pointers are expanded inline; circular refs become `{ $circular: ref }`, and refs beyond `maxRefDepth` become `{ $circular: ref, $reason: "max depth exceeded" }`
+- **Field extraction** — only essential fields kept per operation: `summary`, `description`, `tags`, `parameters`, `requestBody`, `responses`
+- **Output shape** — only `{ paths }` is passed to search; `info`, `servers`, and `components` are omitted because referenced data is expanded into the paths view
 
 You can also use the preprocessing utilities directly:
 
@@ -314,6 +314,8 @@ const codemode = new CodeMode({
 ### Custom Executor
 
 Implement the `Executor` interface to use your own sandbox:
+
+CodeMode passes a fresh structured clone of the processed spec to each `search()` call, so mutations made by a custom executor cannot change later searches.
 
 ```typescript
 import { CodeMode, type Executor, type ExecuteResult } from '@robinbraemer/codemode';
