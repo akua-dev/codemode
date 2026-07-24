@@ -29,6 +29,9 @@ describe("data-only input guard", () => {
       "data-only execution does not accept accessor properties at input.danger",
     );
     expect(rejection?.error).not.toContain("function values");
+    expect(findFunctionPath(input)).toBe(
+      "input.danger (accessor property is not data-only)",
+    );
   });
 
   it("reports object graphs that exceed the guard limit with their path", () => {
@@ -40,6 +43,7 @@ describe("data-only input guard", () => {
       "data-only execution input graph exceeds 100000 nodes at input.entries[99998]",
     );
     expect(rejection?.error).not.toContain("function values");
+    expect(findFunctionPath(input)).toBe("input.entries[99998] (object graph too large)");
   });
 
   it("checks only present entries in sparse arrays", () => {
