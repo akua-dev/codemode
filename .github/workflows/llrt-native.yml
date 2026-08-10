@@ -51,7 +51,7 @@ jobs:
             runner: macos-15-intel
           - target: x86_64-unknown-linux-gnu
             platform_arch_abi: linux-x64-gnu
-            runner: ubuntu-24.04
+            runner: akua-heavy-ci-v2
           - target: aarch64-unknown-linux-gnu
             platform_arch_abi: linux-arm64-gnu
             runner: ubuntu-24.04-arm
@@ -96,7 +96,7 @@ jobs:
 
   package:
     name: Package LLRT
-    runs-on: ubuntu-24.04
+    runs-on: akua-heavy-ci-v2
     needs: build-native
     steps:
       - uses: actions/checkout@v7

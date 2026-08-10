@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: akua-heavy-ci-v2
     steps:
       - uses: actions/checkout@v7
 
