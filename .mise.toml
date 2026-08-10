@@ -2,3 +2,4 @@
 node = "24"
 pnpm = "10"
 task = "latest"
+yarn = "1.22.22"
