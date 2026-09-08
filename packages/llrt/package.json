@@ -64,7 +64,7 @@
     "@napi-rs/cli": "^3.0.0",
     "@types/node": "^26.0.0",
     "tsup": "^8.4.0",
-    "typescript": "^6.0.0",
+    "typescript": "^7.0.0",
     "vitest": "^4.0.0"
   }
 }
